@@ -125,7 +125,7 @@ def configure(argv):
     action.add_argument("--disable", action="store_true")
     action.add_argument("--status", action="store_true")
     action.add_argument("--uninstall", action="store_true", help="移除本插件的启动包装，不卸载官方 CLI")
-    parser.add_argument("--height", type=int)
+    parser.add_argument("--height", type=int, help="HUD 最大行数；内容少时自动收缩")
     args = parser.parse_args(argv)
     directory = settings_dir()
     settings_path = directory / "settings.json"

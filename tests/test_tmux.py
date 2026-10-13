@@ -21,7 +21,7 @@ class TmuxTest(unittest.TestCase):
         self.bin.mkdir()
         fixture = self.bin / "codex"
         fixture.write_text(f"#!{sys.executable}\n" + '''
-import json,os,pathlib,sys,time,uuid
+import json,os,pathlib,sys,time,uuid,sqlite3
 if '--help' in sys.argv:
     print('fixture help');sys.exit(0)
 home=pathlib.Path(os.environ['CODEX_HOME']);folder=home/'sessions';folder.mkdir(parents=True,exist_ok=True)
@@ -29,14 +29,21 @@ identity=str(uuid.uuid4());f=(folder/f'rollout-{identity}.jsonl').open('a')
 def emit(kind,payload):
     f.write(json.dumps({'type':kind,'payload':payload})+'\\n');f.flush()
 emit('session_meta',{'id':identity,'source':'cli','cwd':str(pathlib.Path.cwd()),'proxy':os.environ.get('HTTP_PROXY')})
-emit('turn_context',{'model':'fixture-model'})
 def tokens(n):
+    emit('turn_context',{'model':'fixture-model'})
     emit('event_msg',{'type':'token_count','info':{'model_context_window':100,'last_token_usage':{'input_tokens':n,'total_tokens':n+5},'total_token_usage':{'input_tokens':n,'output_tokens':5,'total_tokens':n+5}}})
-tokens(20)
+if '--fixture-empty-start' in sys.argv:
+    db=sqlite3.connect(home/'state_5.sqlite')
+    db.executescript('CREATE TABLE threads(id TEXT,source TEXT,rollout_path TEXT); CREATE TABLE thread_spawn_edges(parent_thread_id TEXT,child_thread_id TEXT,status TEXT);')
+    db.close()
+else:tokens(20)
 print('FIXTURE READY',flush=True)
 for line in sys.stdin:
     if line.strip()=='quit':break
     if line.strip()=='next':tokens(40)
+    if line.strip()=='reset':
+        f.close();identity=str(uuid.uuid4());f=(folder/f'rollout-{identity}.jsonl').open('a')
+        emit('session_meta',{'id':identity,'source':'cli','cwd':str(pathlib.Path.cwd())})
 f.close()
 ''')
         fixture.chmod(0o755)
@@ -107,7 +114,7 @@ f.close()
         self.assertIn("fixture-model", panel)
         self.assertNotIn("Traceback", panel)
         self.tmux(one, "resize-window", "-t", "codex", "-x", "80", "-y", "24")
-        self.wait_for(lambda: self.tmux(one, "display-message", "-p", "-t", one["hud"], "#{pane_height}").stdout.strip() == "11")
+        self.wait_for(lambda: 1 <= int(self.tmux(one, "display-message", "-p", "-t", one["hud"], "#{pane_height}").stdout.strip()) <= 6)
         subprocess.run([sys.executable, str(ENTRY), "_toggle", one["runtime"]], check=True, timeout=5)
         self.assertEqual(self.tmux(one, "display-message", "-p", "#{window_zoomed_flag}").stdout.strip(), "1")
         subprocess.run([sys.executable, str(ENTRY), "_toggle", one["runtime"]], check=True, timeout=5)
@@ -126,6 +133,24 @@ f.close()
     def test_external_server_exit_is_cleaned_up(self):
         spec = self.launch()
         self.tmux(spec, "kill-server")
+        self.wait_for(lambda: not Path(spec["runtime"]).exists())
+
+    def test_empty_hud_is_hidden_and_returns_only_when_data_arrives(self):
+        spec = self.launch("--fixture-empty-start")
+        def window(pane):
+            return self.tmux(spec, "display-message", "-p", "-t", pane, "#{window_id}").stdout.strip()
+        self.wait_for(lambda: self.snapshot(spec).get("root", {}).get("id"))
+        first_id = self.snapshot(spec)["root"]["id"]
+        self.assertNotEqual(window(spec["top"]), window(spec["hud"]))
+        self.assertEqual(self.tmux(spec, "display-message", "-p", "-t", spec["top"], "#{window_panes}").stdout.strip(), "1")
+        self.send(spec, "next")
+        self.wait_for(lambda: window(spec["top"]) == window(spec["hud"]))
+        self.assertIn("40%", self.tmux(spec, "capture-pane", "-p", "-t", spec["hud"]).stdout)
+        self.send(spec, "reset")
+        self.wait_for(lambda: self.snapshot(spec).get("root", {}).get("id") not in (None, first_id))
+        self.wait_for(lambda: window(spec["top"]) != window(spec["hud"]))
+        self.assertEqual(self.tmux(spec, "display-message", "-p", "-t", spec["top"], "#{window_panes}").stdout.strip(), "1")
+        self.send(spec, "quit")
         self.wait_for(lambda: not Path(spec["runtime"]).exists())
 
     @unittest.skipUnless(sys.platform == "darwin", "macOS BSD script PTY test")

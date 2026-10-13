@@ -118,13 +118,13 @@ class SourcesTest(unittest.TestCase):
         self.assertEqual(turn_state({"status": "completed"}, root=True), "idle")
         self.assertEqual(turn_state({"status": "interrupted"}), "idle")
         self.assertEqual(turn_state(None), "unknown")
-        self.assertEqual(elapsed({"status": "unknown", "started": 100}, 500), "耗时?")
+        self.assertEqual(elapsed({"status": "unknown", "started": 100}, 500), "耗时未知")
 
     def test_missing_and_corrupt_source_dont_become_zero(self):
         empty = Collector(home=self.home / "missing", root_id="missing").collect()
         self.assertIsNone(empty["root"].get("usage"))
         self.assertFalse(empty["agents_known"])
-        self.assertIn("子 agent ?", "\n".join(text for text, kind in lines(empty)))
+        self.assertIn("数据库不可用", "\n".join(text for text, kind in lines(empty)))
         (self.home / "offload").mkdir()
         (self.home / "offload/config.json").write_text("broken")
         self.assertIsNone(Collector(home=self.home).collect()["offload"]["enabled"])

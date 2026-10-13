@@ -9,7 +9,7 @@ Use this plugin's deterministic setup command. The plugin root is two levels abo
 
 - Initial setup, enabling automatic display, or invoking this skill without another action: `python3 <plugin-root>/codex-hud setup --enable`.
 - Disable automatic display: `python3 <plugin-root>/codex-hud setup --disable`.
-- Change height: add `--height N` to setup; valid heights are 6–30.
+- Change maximum panel height: add `--height N` to setup; valid limits are 6–30. The panel shrinks to fit content and stays hidden when it has no data.
 - Read current settings: `python3 <plugin-root>/codex-hud setup --status`.
 - Remove only this plugin's launcher integration when requested: `python3 <plugin-root>/codex-hud setup --uninstall`. Native plugin removal is managed by `/plugins`.
 

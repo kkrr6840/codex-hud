@@ -1,29 +1,43 @@
 from __future__ import annotations
 
 import curses
-import os
+from dataclasses import dataclass
 from pathlib import Path
-import time
 import unicodedata
 
 LABEL = {"running": "运行", "idle": "待命", "completed": "完成", "failed": "失败", "unknown": "未知"}
+ICONS = {"running": "●", "idle": "○", "completed": "✓", "failed": "✕", "unknown": "?"}
+STATE_COLOR = {"running": "good", "idle": "muted", "completed": "good", "failed": "bad", "unknown": "warn"}
+COLORS = {"text": 0, "model": 1, "good": 2, "warn": 3, "bad": 4, "muted": 5, "agent": 6, "dim": 7}
+
+
+def _safe(text):
+    return "".join(" " if c in "\n\t" else c for c in str(text)
+                   if not unicodedata.category(c).startswith("C") or c in "\n\t")
 
 
 def clean(text):
-    # No terminal escapes, bidi overrides, or line breaks from tool/model text.
-    return " ".join("".join(c for c in str(text) if not unicodedata.category(c).startswith("C") or c in "\n\t").split())
+    return " ".join(_safe(text).split())
+
+
+def cell_width(text):
+    return sum(0 if unicodedata.combining(c) else 2 if unicodedata.east_asian_width(c) in ("W", "F") else 1 for c in text)
 
 
 def clip(text, width):
-    text = clean(text)
+    text = _safe(text)
+    if width <= 0:
+        return ""
+    if cell_width(text) <= width:
+        return text
     result, used = "", 0
     for char in text:
-        size = 0 if unicodedata.combining(char) else (2 if unicodedata.east_asian_width(char) in ("W", "F") else 1)
-        if used + size > width:
-            return result[:-1] + "…" if result else ""
+        size = cell_width(char)
+        if used + size > width - 1:
+            break
         result += char
         used += size
-    return result
+    return result + "…"
 
 
 def number(value):
@@ -43,91 +57,172 @@ def elapsed(item, now):
         if end:
             duration = max(0, end - item["started"])
     if duration is None:
-        return "耗时?"
+        return "耗时未知"
     seconds = int(duration)
     return f"{seconds // 3600}h{seconds % 3600 // 60:02}m" if seconds >= 3600 else f"{seconds // 60}m{seconds % 60:02}s" if seconds >= 60 else f"{seconds}s"
 
 
-def lines(snapshot):
+def progress(fraction, width=16):
+    """Terminal-cell bar; percentages retain the actual value above capacity."""
+    units = round(max(0, min(1, fraction)) * width * 8)
+    full, partial = divmod(units, 8)
+    filled = "█" * full + ("▏▎▍▌▋▊▉"[partial - 1] if partial else "")
+    return filled, "░" * (width - full - bool(partial))
+
+
+def capacity_color(fraction):
+    return "bad" if fraction >= .9 else "warn" if fraction >= .7 else "good"
+
+
+@dataclass
+class Row:
+    spans: list[tuple[str, str]]
+    pinned: bool = False
+
+    @property
+    def text(self):
+        return "".join(text for text, _ in self.spans)
+
+
+def render_rows(snapshot, width=100):
     root, agents, offload = snapshot["root"], snapshot["agents"], snapshot["offload"]
-    now = snapshot["time"]
-    model = root.get("model") or "模型等待运行数据"
-    identity = (root.get("id") or "等待本窗口首次发送 / 选择会话")
-    status = LABEL.get(root.get("status"), "未知")
-    result = [(f" CODEX HUD  {model} {root.get('effort') or ''}  · {status}  · {identity[:36]}  · {time.strftime('%H:%M:%S', time.localtime(now))}", "title")]
-    used, window = root.get("context_used"), root.get("context_window")
-    if isinstance(used, int) and isinstance(window, int) and window > 0:
-        pct = used / window
-        bar = "━" * min(12, int(pct * 12)) + "·" * max(0, 12 - int(pct * 12))
-        context = f"上下文请求输入(含系统) [{bar}] {pct:.1%}  {number(used)}/{number(window)}"
-    else:
-        context = f"上下文 ?/{number(window)} (等待 token 事件)"
     usage = root.get("usage") or {}
-    result.append((f" {context}  | 累计 token {number(usage.get('total_tokens'))}", "context"))
-    result.append((f" 输入 {number(usage.get('input_tokens'))}  缓存 {number(usage.get('cached_input_tokens'))}  输出 {number(usage.get('output_tokens'))}  推理 {number(usage.get('reasoning_output_tokens'))}", "muted"))
-    git = snapshot["git"]
-    branch = git.get("branch")
-    cwd = root.get("cwd") or os.getcwd()
-    cwd = cwd.replace(str(Path.home()), "~", 1) if cwd.startswith(str(Path.home())) else cwd
-    git_text = f"{branch} · {'干净' if git.get('changes') == 0 else str(git.get('changes')) + ' 处变更'}" if branch else git.get("error") or "非仓库 / 未知"
-    result.append((f" Git {git_text}  | {cwd}", "muted"))
-    counts = {key: sum(a["status"] == key for a in agents) for key in LABEL}
-    count_text = "  ".join(f"{LABEL[k]} {v}" for k, v in counts.items() if v or k in ("running", "completed"))
-    result.append((f" 子 agent {len(agents)}  · {count_text}" if snapshot.get("agents_known", True) else " 子 agent ? · 等待关系数据", "title"))
-    for agent in agents:
-        name = agent["name"].removeprefix("/root/")
-        result.append((f"  {LABEL.get(agent['status'], '未知'):2}  {name}  [{elapsed(agent, now)}]  {clean(agent['task'])}", agent["status"]))
-    enabled = "ON" if offload["enabled"] is True else "OFF" if offload["enabled"] is False else "未知"
-    jobs = offload["jobs"]
-    job_count = len(jobs) if root.get("id") else "?"
-    result.append((f" codex-x-codex {enabled} · {offload['model']}  | 本会话分流 {job_count}  (含其子 agent)", "title"))
-    totals = {}
-    unknown = 0
-    for job in jobs:
-        usage = job.get("usage")
-        if job["status"] in ("completed", "failed"):
-            if usage is None:
-                unknown += 1
-            else:
-                for k, v in usage.items():
-                    if isinstance(v, int) and v >= 0:
-                        totals[k] = totals.get(k, 0) + v
+    jobs, git = offload["jobs"], snapshot["git"]
+    used, window = root.get("context_used"), root.get("context_window")
+    has_context = isinstance(used, int) and isinstance(window, int) and window > 0
+    has_usage = any(isinstance(value, (int, float)) and value > 0 for value in usage.values())
+    has_core = bool(root.get("model") or has_context or has_usage or git.get("branch"))
+    rows = []
+    if has_core:
+        header = [(f" [{clean(root.get('model') or 'Codex')}]", "model")]
+        if root.get("effort"):
+            header.append((f" {clean(root['effort'])}", "muted"))
+        status = root.get("status")
+        if status in LABEL:
+            header.append((f"  {ICONS[status]} {LABEL[status]}", STATE_COLOR[status]))
+        if root.get("cwd"):
+            cwd = str(root["cwd"])
+            user_home = str(Path.home())
+            if cwd == user_home or cwd.startswith(user_home + "/"):
+                cwd = "~" + cwd[len(user_home):]
+            if width < 100 and len(cwd) > 22:
+                cwd = Path(cwd).name
+            header += [("  │  ", "dim"), (clip(cwd, 28 if width >= 100 else 22), "muted")]
+        if git.get("branch"):
+            header += [("  git:", "dim"), (clean(git["branch"]), "agent")]
+            if git.get("changes"):
+                header.append((f" +{git['changes']}", "warn"))
+        rows.append(Row(header, pinned=True))
+    if has_context:
+        fraction = used / window
+        filled, empty = progress(fraction, 20 if width >= 100 else 14 if width >= 70 else 8)
+        color = capacity_color(fraction)
+        rows.append(Row([(" 上下文 ", "muted"), (filled, color), (empty, "dim"),
+                         (f" {fraction:.0%}", color), (f"  {number(used)} / {number(window)} tokens", "muted")], pinned=True))
+    if has_usage:
+        spans = [(" Token ", "muted")]
+        for key, label in (("input_tokens", "↑"), ("output_tokens", "↓")):
+            if isinstance(usage.get(key), (int, float)):
+                spans += [(f" {label} ", "muted"), (number(usage[key]), "text")]
+        if isinstance(usage.get("reasoning_output_tokens"), int) and usage["reasoning_output_tokens"] > 0:
+            spans += [("  推理 ", "muted"), (number(usage["reasoning_output_tokens"]), "text")]
+        if isinstance(usage.get("total_tokens"), int):
+            spans += [("  │  累计 ", "dim"), (number(usage["total_tokens"]), "text")]
+        rows.append(Row(spans, pinned=True))
+        cached, input_tokens = usage.get("cached_input_tokens"), usage.get("input_tokens")
+        if isinstance(cached, int) and isinstance(input_tokens, int) and 0 <= cached <= input_tokens and input_tokens > 0:
+            fraction = cached / input_tokens
+            filled, empty = progress(fraction, 20 if width >= 100 else 14 if width >= 70 else 8)
+            rows.append(Row([(" 缓存   ", "muted"), (filled, "model"), (empty, "dim"),
+                             (f" {fraction:.0%}", "model"), (f"  {number(cached)} / {number(input_tokens)} tokens", "muted")], pinned=True))
+    if agents:
+        counts = [(key, sum(a["status"] == key for a in agents)) for key in LABEL]
+        spans = [(" Agents", "model")]
+        for key, count in counts:
+            if count:
+                spans += [("  ", "dim"), (f"{count} {LABEL[key]}", STATE_COLOR[key])]
+        rows.append(Row(spans))
+        for agent in agents:
+            status = agent["status"]
+            rows.append(Row([(f" {ICONS.get(status, '?')} ", STATE_COLOR.get(status, "warn")),
+                             (clean(agent["name"].removeprefix("/root/")), "agent"),
+                             (f"  {elapsed(agent, snapshot['time'])}", "muted"),
+                             ("  ·  ", "dim"), (clean(agent["task"]).removesuffix(" (任务名；详细指令加密)"), "muted")]))
     if jobs:
-        result.append((f" 分流已返回用量：输入 {number(totals.get('input_tokens'))}  缓存 {number(totals.get('cached_input_tokens'))}  输出 {number(totals.get('output_tokens'))}  未知用量 {unknown} 项", "muted"))
+        enabled = "ON" if offload["enabled"] is True else "OFF" if offload["enabled"] is False else "未知"
+        running = sum(j["status"] == "running" for j in jobs)
+        completed = sum(j["status"] == "completed" for j in jobs)
+        rows.append(Row([(" codex-x-codex ", "model"), (enabled, "good" if enabled == "ON" else "muted"),
+                         (f"  │  {running} 运行 · {completed} 完成", "muted")]))
+        unknown = sum(j["status"] in ("completed", "failed") and j.get("usage") is None for j in jobs)
+        if unknown:
+            rows.append(Row([(f" ! 分流未知用量 {unknown} 项", "warn")]))
         for job in jobs:
-            usage = job.get("usage")
-            detail = f"I {number(usage.get('input_tokens'))} C {number(usage.get('cached_input_tokens'))} O {number(usage.get('output_tokens'))}" if usage else "用量未知"
-            result.append((f"  {LABEL.get(job['status'], '未知')} {job['model']} [{elapsed(job, now)}] {detail} · {clean(job['task'])}", job["status"]))
-    for error in snapshot["errors"]:
-        result.append((f" ! {error}", "failed"))
-    return result
+            status, job_usage = job["status"], job.get("usage")
+            spans = [(f" {ICONS.get(status, '?')} ", STATE_COLOR.get(status, "warn")),
+                     (clean(job.get("model") or "Relay"), "agent"),
+                     (f"  {elapsed(job, snapshot['time'])}", "muted")]
+            if job_usage:
+                for key, label in (("input_tokens", "↑"), ("cached_input_tokens", "缓存"), ("output_tokens", "↓")):
+                    if isinstance(job_usage.get(key), int):
+                        spans.append((f"  {label} {number(job_usage[key])}", "muted"))
+            else:
+                spans.append(("  用量待回传" if status == "running" else "  用量未知", "muted" if status == "running" else "warn"))
+            spans += [("  ·  ", "dim"), (clean(job["task"]), "muted")]
+            rows.append(Row(spans))
+    for error in snapshot.get("errors", []):
+        rows.append(Row([(f" ! {clean(error)}", "warn")]))
+    if git.get("error"):
+        rows.append(Row([(f" ! {clean(git['error'])}", "warn")]))
+    return rows
 
 
-def paint(screen, snapshot, scroll=0):
+def lines(snapshot):
+    """Plain view for inspection and source-contract tests."""
+    return [(row.text, row.spans[0][1]) for row in render_rows(snapshot)]
+
+
+def init_colors():
+    if not curses.has_colors():
+        return
+    curses.start_color()
+    curses.use_default_colors()
+    palette = [81, 114, 220, 203, 245, 141, 238] if curses.COLORS >= 256 else [curses.COLOR_CYAN, curses.COLOR_GREEN, curses.COLOR_YELLOW, curses.COLOR_RED, curses.COLOR_WHITE, curses.COLOR_MAGENTA, curses.COLOR_WHITE]
+    for index, color in enumerate(palette, 1):
+        curses.init_pair(index, color, -1)
+
+
+def paint(screen, snapshot, scroll=0, expanded=False):
     height, width = screen.getmaxyx()
-    data = lines(snapshot)
+    rows = render_rows(snapshot, width)
     screen.erase()
-    # Core telemetry stays fixed while agent and offload details scroll.
-    header = min(4, max(1, height - 3))
-    room = max(0, height - header - 1)
-    scroll = max(0, min(scroll, max(0, len(data) - header - room)))
-    visible = data[:header] + data[header + scroll:header + scroll + room]
-    colors = {"title": 1, "context": 2, "running": 2, "completed": 3, "failed": 4, "unknown": 5, "idle": 5, "muted": 5}
-    for y, (text, kind) in enumerate(visible):
-        try:
-            attr = curses.color_pair(colors.get(kind, 5))
-            if kind == "title":
-                attr |= curses.A_BOLD
-            screen.addstr(y, 0, clip(text, max(0, width - 1)), attr)
-        except curses.error:
-            pass
-    remaining = max(0, len(data) - header - room - scroll)
-    footer = f" Ctrl-b H 展开/收起 · ↑↓/j/k 滚动 · Esc 回到 CLI · CLI /quit 退出"
-    if remaining:
-        footer += f" · 下方还有 {remaining} 行"
-    try:
-        screen.addstr(height - 1, 0, clip(footer, width - 1), curses.color_pair(5))
-    except curses.error:
-        pass
+    pinned = [row for row in rows if row.pinned]
+    details = [row for row in rows if not row.pinned]
+    overflow = len(rows) > height
+    footer = expanded or overflow
+    pinned = pinned[:max(0, height - int(footer))]
+    room = max(0, height - len(pinned) - int(footer))
+    scroll = max(0, min(scroll, max(0, len(details) - room)))
+    visible = pinned + details[scroll:scroll + room]
+    if footer:
+        remaining = max(0, len(details) - scroll - room)
+        hint = " ↑↓ 滚动 · Esc 返回 CLI" if expanded else f" … 另有 {remaining} 行 · Ctrl-b H 展开"
+        visible += [Row([(hint, "dim")])]
+    for y, row in enumerate(visible[:height]):
+        x = 0
+        for text, kind in row.spans:
+            rendered = clip(text, width - x - 1)
+            if not rendered:
+                break
+            try:
+                attr = curses.color_pair(COLORS.get(kind, 0))
+                if kind == "model":
+                    attr |= curses.A_BOLD
+                screen.addstr(y, x, rendered, attr)
+            except curses.error:
+                pass
+            x += cell_width(rendered)
+            if rendered != text:
+                break
     screen.refresh()
     return scroll

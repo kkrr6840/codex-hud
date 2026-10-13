@@ -4,6 +4,8 @@
 
 ![Codex plugin](https://img.shields.io/badge/Codex-plugin-blue) ![License](https://img.shields.io/badge/license-MIT-green)
 
+![HUD 样式预览，图中为示例数据](assets/preview.png)
+
 ## 安装
 
 已在 macOS 15、arm64、Codex CLI 0.162.1 上实测。需要 Python 3.11+、tmux 和 lsof；Git 状态显示还需要 Git。macOS 缺少依赖时可以安装：
@@ -31,7 +33,7 @@ codex plugin add codex-hud@codex-hud
 
 新开一次终端标签页以加载设置；此后正常运行 `codex`、`codex resume` 或 `codex fork` 都自动带 HUD。已在运行、且不在 tmux 中的 CLI 需要重新进入一次。
 
-配置 skill 也支持“关闭自动 HUD”“高度设为 8 行”“查看状态”“移除启动包装”。在 `/plugins` 中禁用或卸载插件后，启动包装会退回官方 CLI。需要删除包装和 PATH 标记时，通过 hud skill 执行“移除启动包装”。
+配置 skill 也支持“关闭自动 HUD”“最大高度设为 8 行”“查看状态”“移除启动包装”。在 `/plugins` 中禁用或卸载插件后，启动包装会退回官方 CLI。需要删除包装和 PATH 标记时，通过 hud skill 执行“移除启动包装”。
 
 ## 显示内容
 
@@ -40,7 +42,11 @@ codex plugin add codex-hud@codex-hud
 - 原生子 agent 的名称、任务、状态和耗时；来自父子线程关系和轮次事件，不以进程数代替 agent 数。
 - codex-x-codex 的开关状态，以及本会话及其子 agent 关联的分流状态和完成用量；不把全局记录混入当前会话。
 
-运行、待命、完成、失败和未知状态分开显示。无法读取的数据保留为未知；加密的详细任务指令显示实际任务名。上下文数字是包含系统内容的请求输入，和原生 TUI 的 token 显示口径可能不同。
+初次进入或切换到无数据的新会话时，面板完全隐藏；有实际数据后自动出现。缺少的字段、空 agent 和空分流区域不显示，面板高度随内容收缩。真实读取错误和已有任务的未知用量仍会明确提示。
+
+上下文使用彩色进度条：低于 70% 为绿色，70% 起为黄色，90% 起为红色；缓存占比单独使用蓝色进度条。累计 token 是计数，不会用上下文容量作为它的错误分母。
+
+运行、待命、完成、失败和未知状态分开显示；加密的详细任务指令显示实际任务名。上下文数字是包含系统内容的请求输入，和原生 TUI 的 token 显示口径可能不同。
 
 `Ctrl-b H` 展开或收起详情；在 HUD 中使用方向键或 `j/k` 滚动，`Esc` 回到 CLI。正常输入 `/quit` 退出，临时诊断日志、HUD 进程和私有 tmux 会话会自动清理。
 

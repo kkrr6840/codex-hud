@@ -13,7 +13,7 @@ import sys
 import tempfile
 import time
 
-from .display import paint
+from .display import paint, init_colors, render_rows
 from .sources import Collector, atomic_json, read_json
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -32,7 +32,7 @@ def command(*args):
 def launch(argv):
     parser = argparse.ArgumentParser(prog="codex-hud", description="官方 Codex CLI + 独立 tmux 固定底部 HUD。CLI 参数可直接传入，或放在 -- 后。")
     parser.add_argument("--detach", action="store_true", help="后台启动，打印附加命令")
-    parser.add_argument("--hud-height", type=int, default=11, help="底部行数，默认 11；Ctrl-b H 可展开")
+    parser.add_argument("--hud-height", type=int, default=11, help="底部最大行数，默认 11；按内容收缩，Ctrl-b H 可展开")
     parser.add_argument("--width", type=int, default=140, help="后台启动时的终端列数")
     parser.add_argument("--height", type=int, default=40, help="后台启动时的终端行数")
     # parse only HUD options; all other tokens remain official CLI arguments.
@@ -80,8 +80,8 @@ def launch(argv):
         tmux(socket, "set-option", "-g", "default-terminal", "tmux-256color")
         tmux(socket, "set-option", "-g", "pane-border-style", "fg=colour238")
         tmux(socket, "set-option", "-g", "pane-active-border-style", "fg=colour238")
-        size = min(options.hud_height, options.height // 2)
-        split = tmux(socket, "split-window", "-v", "-l", size, "-t", spec["top"],
+        # Start the observer off-screen. It joins the CLI only when it has data.
+        split = tmux(socket, "new-window", "-d", "-t", "codex", "-n", "_hud",
                      "-c", os.getcwd(), "-P", "-F", "#{pane_id}", command("_panel", runtime))
         spec["hud"] = split.stdout.strip()
         atomic_json(runtime / "spec.json", spec)
@@ -172,7 +172,11 @@ def runner(runtime):
 
 def toggle(runtime):
     spec = read_json(Path(runtime) / "spec.json")
-    zoomed = tmux(spec["socket"], "display-message", "-p", "-t", "codex", "#{window_zoomed_flag}").stdout.strip() == "1"
+    snapshot = read_json(Path(runtime) / "snapshot.json")
+    if not snapshot or not render_rows(snapshot):
+        return 0
+    sync_layout(spec, snapshot)
+    zoomed = tmux(spec["socket"], "display-message", "-p", "-t", spec["top"], "#{window_zoomed_flag}").stdout.strip() == "1"
     if zoomed:
         tmux(spec["socket"], "resize-pane", "-Z")
         tmux(spec["socket"], "select-pane", "-t", spec["top"])
@@ -180,6 +184,34 @@ def toggle(runtime):
         tmux(spec["socket"], "select-pane", "-t", spec["hud"])
         tmux(spec["socket"], "resize-pane", "-Z")
     return 0
+
+
+def sync_layout(spec, snapshot):
+    """Keep empty HUDs off-screen and size visible panels to their content."""
+    if not spec.get("hud"):
+        return False
+    socket = spec["socket"]
+    main = tmux(socket, "display-message", "-p", "-t", spec["top"],
+                "#{window_id} #{window_height} #{window_width} #{window_zoomed_flag}", check=False).stdout.split()
+    panel_info = tmux(socket, "display-message", "-p", "-t", spec["hud"],
+                      "#{window_id} #{pane_height}", check=False).stdout.split()
+    if len(main) != 4 or len(panel_info) != 2:
+        return False
+    rows = render_rows(snapshot, int(main[2]))
+    docked = main[0] == panel_info[0]
+    if not rows:
+        if docked:
+            if main[3] == "1":
+                tmux(socket, "resize-pane", "-t", spec["top"], "-Z", check=False)
+            tmux(socket, "break-pane", "-d", "-s", spec["hud"], "-n", "_hud", check=False)
+            tmux(socket, "select-pane", "-t", spec["top"], check=False)
+        return False
+    desired = min(spec["hud_height"], max(1, int(main[1]) // 2), len(rows))
+    if not docked:
+        tmux(socket, "join-pane", "-d", "-v", "-l", desired, "-s", spec["hud"], "-t", spec["top"], check=False)
+    elif main[3] == "0" and int(panel_info[1]) != desired:
+        tmux(socket, "resize-pane", "-t", spec["hud"], "-y", desired, check=False)
+    return docked and main[3] == "1"
 
 
 def panel(runtime):
@@ -195,12 +227,8 @@ def panel(runtime):
             pass
         screen.nodelay(True)
         screen.keypad(True)
-        if curses.has_colors():
-            curses.start_color()
-            curses.use_default_colors()
-            for i, color in enumerate([curses.COLOR_CYAN, curses.COLOR_YELLOW, curses.COLOR_GREEN, curses.COLOR_RED, curses.COLOR_WHITE], 1):
-                curses.init_pair(i, color, -1)
-        scroll, refresh, snapshot = 0, 0, None
+        init_colors()
+        scroll, refresh, snapshot, expanded = 0, 0, None, False
         while True:
             if (runtime / "exit.json").exists():
                 break
@@ -221,13 +249,6 @@ def panel(runtime):
                 tmux(spec["socket"], "select-pane", "-t", spec["top"])
             if time.monotonic() - refresh >= 1 or snapshot is None:
                 spec = read_json(runtime / "spec.json", spec)
-                if spec.get("hud"):
-                    layout = tmux(spec["socket"], "display-message", "-p", "-t", spec["hud"],
-                                  "#{window_height} #{pane_height} #{window_zoomed_flag}", check=False).stdout.split()
-                    if len(layout) == 3 and layout[2] == "0":
-                        desired = min(spec["hud_height"], max(3, int(layout[0]) // 2))
-                        if int(layout[1]) != desired:
-                            tmux(spec["socket"], "resize-pane", "-t", spec["hud"], "-y", desired, check=False)
                 runner_info = read_json(runtime / "runner.json", {})
                 collector.runner = runner_info.get("pid")
                 collector.launched_at = runner_info.get("started")
@@ -235,8 +256,9 @@ def panel(runtime):
                 if not snapshot["root"].get("cwd"):
                     snapshot["root"]["cwd"] = spec["cwd"]
                 atomic_json(runtime / "snapshot.json", snapshot)
+                expanded = sync_layout(spec, snapshot)
                 refresh = time.monotonic()
-            scroll = paint(screen, snapshot, scroll)
+            scroll = paint(screen, snapshot, scroll, expanded)
             time.sleep(0.1)
     try:
         curses.wrapper(ui)
