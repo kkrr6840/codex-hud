@@ -10,6 +10,7 @@ import shlex
 import sqlite3
 import subprocess
 import time
+import tomllib
 from datetime import datetime
 
 
@@ -150,6 +151,7 @@ class Rollout:
         self.calls = {}
         self.tool_sessions = {}
         self.cells = {}
+        self.activity = {}
 
     def refresh(self):
         try:
@@ -160,9 +162,12 @@ class Rollout:
                 self.calls.clear()
                 self.tool_sessions.clear()
                 self.cells.clear()
+                self.activity.clear()
             with self.path.open("rb") as handle:
                 if self.offset == 0:
                     first = handle.readline()
+                    if not first.endswith(b"\n"):
+                        return self.data
                     try:
                         self.consume(json.loads(first))
                     except ValueError:
@@ -170,6 +175,7 @@ class Rollout:
                     # Resume large sessions without reparsing old conversations.
                     start = max(handle.tell(), stat.st_size - 2 * 1024 * 1024)
                     if start > handle.tell():
+                        self.data["history_partial"] = True
                         handle.seek(start)
                         handle.readline()
                     self.offset = handle.tell()
@@ -190,6 +196,8 @@ class Rollout:
         return self.data
 
     def consume(self, row):
+        if not isinstance(row, dict):
+            return
         kind, payload = row.get("type"), row.get("payload") or {}
         if not isinstance(payload, dict):
             return
@@ -197,7 +205,10 @@ class Rollout:
         if kind == "session_meta":
             data.update(id=payload.get("id"), cwd=payload.get("cwd"),
                         parent=payload.get("parent_thread_id"),
-                        name=payload.get("agent_path") or payload.get("agent_nickname"))
+                        name=payload.get("agent_path") or payload.get("agent_nickname"),
+                        created_at=timestamp(payload.get("timestamp") or row.get("timestamp")),
+                        cli_version=payload.get("cli_version"), provider=payload.get("model_provider"),
+                        added_dirs=payload.get("runtime_workspace_roots") or [])
         elif kind == "turn_context":
             for key in ("model", "cwd", "effort"):
                 if payload.get(key):
@@ -218,14 +229,22 @@ class Rollout:
         elif kind == "token_usage_record" and payload.get("thread_id") == data.get("id"):
             if isinstance(payload.get("thread_token_usage"), dict):
                 data["usage"] = payload["thread_token_usage"]
+                data["usage_scope"] = "thread"
+            if isinstance(payload.get("usage"), dict) and isinstance(payload["usage"].get("input_tokens"), int):
+                data["context_used"] = payload["usage"]["input_tokens"]
         elif kind == "event_msg":
             event = payload.get("type")
+            if event == "token_count" and "rate_limits" in payload:
+                # Quota-only events may have info=null. Replace the whole
+                # snapshot so missing windows never reuse a previous quota.
+                limits = payload["rate_limits"]
+                data["rate_limits"] = limits if isinstance(limits, dict) else None
             if event == "token_count" and isinstance(payload.get("info"), dict):
                 info = payload["info"]
-                if isinstance(info.get("total_token_usage"), dict):
+                if data.get("usage_scope") != "thread" and isinstance(info.get("total_token_usage"), dict):
                     data["usage"] = info["total_token_usage"]
                 last = info.get("last_token_usage")
-                if isinstance(last, dict) and isinstance(last.get("input_tokens"), int):
+                if data.get("usage_scope") != "thread" and isinstance(last, dict) and isinstance(last.get("input_tokens"), int):
                     data["context_used"] = last["input_tokens"]
                 if info.get("model_context_window"):
                     data["context_window"] = info["model_context_window"]
@@ -239,16 +258,32 @@ class Rollout:
                             ended=timestamp(payload.get("completed_at") or row.get("timestamp")))
                 if isinstance(payload.get("duration_ms"), (int, float)):
                     data["duration"] = payload["duration_ms"] / 1000
+                data["last_response_at"] = data.get("ended")
+                for tool in self.activity.values():
+                    if tool["status"] == "running":
+                        tool["status"] = "unknown"
             elif event == "context_compacted":
                 data.pop("context_used", None)
         elif kind == "compacted":
             data.pop("context_used", None)
+            data["compactions"] = data.get("compactions", 0) + 1
 
     def tool_call(self, payload, when):
         """Decode literals only. Never evaluate agent-generated JavaScript."""
         source = payload.get("input") or payload.get("arguments") or ""
         name = payload.get("name", "")
         call = payload.get("call_id")
+        if call:
+            self.activity[call] = {"id": call, "name": name, "status": "running", "started": timestamp(when)}
+            # Bound the activity view, without truncating separately collected
+            # token totals or guessing tool runs from generated source code.
+            if len(self.activity) > 200:
+                self.activity.pop(next(iter(self.activity)))
+            self.data["tools"] = list(self.activity.values())
+        if name.removeprefix("functions.") == "update_plan":
+            plan = read_literal_object(source).get("plan")
+            if isinstance(plan, list):
+                self.data["todos"] = [{"step": p["step"], "status": p["status"]} for p in plan if isinstance(p, dict) and isinstance(p.get("step"), str) and p.get("status") in ("pending", "in_progress", "completed")]
         commands, sessions = [], []
         if name == "exec_command":
             args = read_literal_object(source)
@@ -282,6 +317,17 @@ class Rollout:
             self.calls[call] = ("poll", self.tool_sessions[sessions[0]])
 
     def tool_output(self, payload, when):
+        tool = self.activity.get(payload.get("call_id"))
+        if tool:
+            tool.update(status="completed", ended=timestamp(when))
+            output = payload.get("output")
+            texts = [output] if isinstance(output, str) else [x.get("text", "") for x in output or [] if isinstance(x, dict)]
+            for text in texts:
+                for obj in json_objects(text):
+                    if obj.get("isError") is True or (type(obj.get("exit_code")) is int and obj["exit_code"] != 0):
+                        tool["status"] = "failed"
+            if tool.get("started") is not None and tool.get("ended") is not None:
+                tool["duration"] = max(0, tool["ended"] - tool["started"])
         binding = self.calls.get(payload.get("call_id"))
         if not binding:
             return
@@ -307,7 +353,7 @@ class Rollout:
                                ended=timestamp(when), usage=(response or {}).get("usage"),
                                duration=(response or {}).get("duration_seconds"),
                                model=(response or {}).get("model") or job["model"],
-                               worker_id=(response or {}).get("thread_id"))
+                               worker_id=(response or {}).get("thread_id"), error=(response or {}).get("error"))
 
 
 def read_literal_object(source):
@@ -413,7 +459,8 @@ def offload_job(row, configured_model, launched_at=None):
             "task": option("--task", "只读子任务"), "started": started, "ended": ended,
             "model": (response or {}).get("model") or option("--model", configured_model),
             "duration": (response or {}).get("duration_seconds"),
-            "usage": (response or {}).get("usage"), "worker_id": (response or {}).get("thread_id")}
+            "usage": (response or {}).get("usage"), "worker_id": (response or {}).get("thread_id"),
+            "error": (response or {}).get("error")}
 
 
 class Collector:
@@ -430,6 +477,7 @@ class Collector:
         self.jobs = {}
         self.tasks = {}
         self.diagnostic = Diagnostic(diagnostic) if diagnostic else None
+        self.extra_cache = {}
 
     def reader(self, path):
         path = str(path)
@@ -437,7 +485,7 @@ class Collector:
             self.readers[path] = Rollout(path)
         return self.readers[path].refresh()
 
-    def collect(self):
+    def collect(self, options=None):
         now = time.time()
         errors = []
         if self.runner and now - self.last_bind >= 2:
@@ -477,6 +525,11 @@ class Collector:
                     row = state.execute("SELECT * FROM threads WHERE id=?", (self.root_id,)).fetchone()
                     if row:
                         rows[self.root_id] = dict(row)
+                        detail = dict(row)
+                        root.update(session_name=detail.get("name") or detail.get("title"),
+                                    provider=detail.get("model_provider") or root.get("provider"),
+                                    cli_version=detail.get("cli_version") or root.get("cli_version"))
+                        root["created_at"] = root.get("created_at") or detail.get("created_at")
                     pending, seen = [self.root_id], {self.root_id}
                     while pending:
                         for edge in state.execute("SELECT * FROM thread_spawn_edges WHERE parent_thread_id=?", (pending.pop(),)):
@@ -538,6 +591,7 @@ class Collector:
                                    "status": status, "started": (turn or {}).get("started_at") or detail.get("started"),
                                    "ended": (turn or {}).get("completed_at") or detail.get("ended"),
                                    "duration": (turn["duration_ms"] / 1000 if turn and turn.get("duration_ms") is not None else detail.get("duration"))})
+                    agents[-1]["usage"] = detail.get("usage")
                 agents_known = state is not None
             except (sqlite3.Error, OSError, ValueError) as error:
                 errors.append(f"数据源不可用: {error}")
@@ -567,7 +621,25 @@ class Collector:
         if root.get("error"):
             errors.append(f"会话日志不可读: {root['error']}")
         return {"time": now, "root": root, "agents": agents, "agents_known": agents_known, "offload": offload,
-                "git": self.git(root.get("cwd")), "errors": errors}
+                "git": self.git(root.get("cwd")), "errors": errors,
+                "environment": self.cached_extra("environment", self.environment) if (options or {}).get("show", {}).get("environment") else None,
+                "memory": self.cached_extra("memory", system_memory) if (options or {}).get("show", {}).get("memory") else None}
+
+    def cached_extra(self, name, reader):
+        last, value = self.extra_cache.get(name, (0, None))
+        if time.time() - last > 10:
+            value = reader()
+            self.extra_cache[name] = (time.time(), value)
+        return value
+
+    def environment(self):
+        try:
+            config = tomllib.loads((self.home / "config.toml").read_text())
+            return {"mcp": sum(v.get("enabled", True) is not False for v in config.get("mcp_servers", {}).values() if isinstance(v, dict)),
+                    "plugins": sum(v.get("enabled") is True for v in config.get("plugins", {}).values() if isinstance(v, dict)),
+                    "instructions": int((self.home / "AGENTS.md").is_file())}
+        except (OSError, ValueError, TypeError):
+            return None
 
     def git(self, cwd):
         now = time.time()
@@ -584,10 +656,37 @@ class Collector:
                     branch = lines[0][3:].split("...")[0] if lines else "unknown"
                     for prefix in ("No commits yet on ", "Initial commit on "):
                         branch = branch.removeprefix(prefix)
-                    data = {"branch": branch, "changes": len(lines) - 1}
+                    changes = lines[1:]
+                    data = {"branch": branch, "changes": len(changes),
+                            "ahead": int((re.search(r"ahead (\d+)", lines[0]) or [None, 0])[1]),
+                            "behind": int((re.search(r"behind (\d+)", lines[0]) or [None, 0])[1]),
+                            "added": sum("A" in line[:2] for line in changes),
+                            "modified": sum("M" in line[:2] for line in changes),
+                            "deleted": sum("D" in line[:2] for line in changes),
+                            "untracked": sum(line.startswith("??") for line in changes)}
+                    marker = Path(cwd) / ".git"
+                    if marker.is_file():
+                        data["worktree"] = Path(cwd).name
                 elif "not a git repository" not in result.stderr:
                     data["error"] = "Git 状态读取失败"
             except (OSError, subprocess.SubprocessError):
                 data["error"] = "Git 状态读取失败"
         self.git_cache = now, cwd, data
         return data
+
+
+def system_memory():
+    """OS-reported physical RAM, separate from model context."""
+    try:
+        if Path("/proc/meminfo").exists():
+            values = dict(re.findall(r"^(\w+):\s+(\d+)", Path("/proc/meminfo").read_text(), re.M))
+            total, available = int(values["MemTotal"]) * 1024, int(values["MemAvailable"]) * 1024
+        else:
+            total = int(subprocess.check_output(["sysctl", "-n", "hw.memsize"], text=True, timeout=2))
+            output = subprocess.check_output(["vm_stat"], text=True, timeout=2)
+            page = int(re.search(r"page size of (\d+) bytes", output)[1])
+            values = dict(re.findall(r"^(Pages [^:]+):\s+(\d+)", output, re.M))
+            available = sum(int(values.get(k, 0)) for k in ("Pages free", "Pages inactive", "Pages speculative")) * page
+        return {"total": total, "used": max(0, total - available)}
+    except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
+        return None

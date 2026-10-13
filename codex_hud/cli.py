@@ -13,7 +13,7 @@ import sys
 import tempfile
 import time
 
-from .display import paint, init_colors, render_rows
+from .display import paint, init_colors, render_rows, clip
 from .sources import Collector, atomic_json, read_json
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -86,6 +86,7 @@ def launch(argv):
         spec["hud"] = split.stdout.strip()
         atomic_json(runtime / "spec.json", spec)
         tmux(socket, "bind-key", "H", "run-shell", command("_toggle", runtime))
+        tmux(socket, "bind-key", "C", "display-popup", "-E", "-w", "85%", "-h", "85%", command("config", "--menu"))
         tmux(socket, "select-pane", "-t", spec["top"])
         watcher = subprocess.Popen([sys.executable, str(ENTRY), "_watch", str(runtime)],
                                    stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
@@ -206,7 +207,7 @@ def sync_layout(spec, snapshot):
             tmux(socket, "break-pane", "-d", "-s", spec["hud"], "-n", "_hud", check=False)
             tmux(socket, "select-pane", "-t", spec["top"], check=False)
         return False
-    desired = min(spec["hud_height"], max(1, int(main[1]) // 2), len(rows))
+    desired = min(snapshot.get("display", {}).get("height", spec["hud_height"]), max(1, int(main[1]) // 2), len(rows))
     if not docked:
         tmux(socket, "join-pane", "-d", "-v", "-l", desired, "-s", spec["hud"], "-t", spec["top"], check=False)
     elif main[3] == "0" and int(panel_info[1]) != desired:
@@ -219,6 +220,7 @@ def panel(runtime):
     atomic_json(runtime / "panel.json", {"pid": os.getpid()})
     spec = read_json(runtime / "spec.json")
     collector = Collector(home=spec["home"], diagnostic=spec.get("diagnostic"))
+    from .config import load
     def ui(screen):
         nonlocal spec
         try:
@@ -227,7 +229,8 @@ def panel(runtime):
             pass
         screen.nodelay(True)
         screen.keypad(True)
-        init_colors()
+        config, config_error = load({"height": spec["hud_height"]})
+        init_colors(config)
         scroll, refresh, snapshot, expanded = 0, 0, None, False
         while True:
             if (runtime / "exit.json").exists():
@@ -252,7 +255,14 @@ def panel(runtime):
                 runner_info = read_json(runtime / "runner.json", {})
                 collector.runner = runner_info.get("pid")
                 collector.launched_at = runner_info.get("started")
-                snapshot = collector.collect()
+                new_config, config_error = load({"height": spec["hud_height"]})
+                if new_config != config:
+                    config = new_config
+                    init_colors(config)
+                snapshot = collector.collect(config)
+                snapshot["display"] = config
+                if config_error:
+                    snapshot["errors"].append(config_error)
                 if not snapshot["root"].get("cwd"):
                     snapshot["root"]["cwd"] = spec["cwd"]
                 atomic_json(runtime / "snapshot.json", snapshot)
@@ -290,8 +300,105 @@ def watch(runtime):
     return 0
 
 
+def observe(argv):
+    """Read-only, pinned-session HUD for a terminal pane outside the launcher."""
+    parser = argparse.ArgumentParser(prog="codex-hud watch", description="只读监视已有会话，不启动或恢复 Codex")
+    parser.add_argument("--session", default=os.environ.get("CODEX_THREAD_ID"), help="固定监视的会话 ID")
+    parser.add_argument("--home", help="该会话所在的 Codex 状态目录")
+    parser.add_argument("--once", action="store_true", help="输出一次纯文本，便于核对数据来源")
+    args = parser.parse_args(argv)
+    if not args.session:
+        parser.error("需要 --session 会话ID")
+    collector = Collector(home=args.home, root_id=args.session)
+    from .config import load
+    def collect():
+        config, error = load()
+        snapshot = collector.collect(config)
+        snapshot["display"] = config
+        if error:
+            snapshot["errors"].append(error)
+        return snapshot
+    if args.once:
+        print(f"只读监视会话 {args.session}")
+        for row in render_rows(collect()):
+            print(row.text)
+        return 0
+    if not sys.stdin.isatty() or not sys.stdout.isatty():
+        parser.error("请在终端分屏中运行；数据核对可用 --once")
+    def ui(screen):
+        try:
+            curses.curs_set(0)
+        except curses.error:
+            pass
+        screen.nodelay(True)
+        screen.keypad(True)
+        init_colors()
+        scroll, refreshed, snapshot = 0, 0, None
+        while True:
+            key = screen.getch()
+            if key in (ord('q'), 27, 3):
+                return
+            if key in (curses.KEY_DOWN, ord('j')):
+                scroll += 1
+            elif key in (curses.KEY_UP, ord('k')):
+                scroll = max(0, scroll - 1)
+            if snapshot is None or time.monotonic() - refreshed >= 1:
+                snapshot, refreshed = collect(), time.monotonic()
+                init_colors(snapshot["display"])
+            scroll = paint(screen, snapshot, scroll, expanded=True)
+            height, width = screen.getmaxyx()
+            try:
+                screen.move(height - 1, 0)
+                screen.clrtoeol()
+                screen.addstr(height - 1, 0, clip(f" 只读监视 {args.session[:8]} · ↑↓ 滚动 · q 退出面板", width - 1), curses.color_pair(5))
+                screen.refresh()
+            except curses.error:
+                pass
+            time.sleep(.1)
+    try:
+        curses.wrapper(ui)
+    except KeyboardInterrupt:
+        pass
+    return 0
+
+
+def refresh_panels(argv):
+    parser = argparse.ArgumentParser(prog="codex-hud refresh", description="只更新当前会话的 HUD 进程，保留正在运行的 Codex")
+    parser.add_argument("--session", default=os.environ.get("CODEX_THREAD_ID"))
+    args = parser.parse_args(argv)
+    if not args.session:
+        parser.error("需要 --session 会话 ID")
+    updated = []
+    base = Path(os.environ.get("CODEX_HUD_RUNTIME_DIR", tempfile.gettempdir()))
+    for runtime in base.glob("codex-hud-*"):
+        snapshot = read_json(runtime / "snapshot.json", {})
+        if (snapshot.get("root") or {}).get("id") != args.session:
+            continue
+        spec = read_json(runtime / "spec.json", {})
+        if spec.get("socket") != runtime.name or not spec.get("hud") or not spec.get("top"):
+            continue
+        socket = spec["socket"]
+        before = tmux(socket, "display-message", "-p", "-t", spec["top"], "#{pane_pid}").stdout.strip()
+        tmux(socket, "respawn-pane", "-k", "-t", spec["hud"], command("_panel", runtime))
+        tmux(socket, "bind-key", "H", "run-shell", command("_toggle", runtime))
+        tmux(socket, "bind-key", "C", "display-popup", "-E", "-w", "85%", "-h", "85%", command("config", "--menu"))
+        after = tmux(socket, "display-message", "-p", "-t", spec["top"], "#{pane_pid}").stdout.strip()
+        if before != after:
+            raise RuntimeError("CLI pane identity changed while refreshing HUD")
+        updated.append({"runtime": str(runtime), "cli_pid": before})
+    print(json.dumps({"updated": updated}, ensure_ascii=False))
+    return 0 if updated else 1
+
+
 def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
+    if argv and argv[0] == "watch":
+        return observe(argv[1:])
+    if argv and argv[0] == "config":
+        from .config import configure
+        return configure(argv[1:])
+    if argv and argv[0] == "refresh":
+        return refresh_panels(argv[1:])
     if argv and argv[0] in ("setup", "configure"):
         from .integration import configure
         return configure(argv[1:])

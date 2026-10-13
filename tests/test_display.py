@@ -1,4 +1,5 @@
 import unittest
+from datetime import datetime
 
 from codex_hud.display import render_rows, progress, cell_width, clip
 
@@ -41,8 +42,34 @@ class DisplayTest(unittest.TestCase):
         self.assertIn("会话日志不可读", render_rows(snapshot)[0].text)
         snapshot["offload"]["jobs"] = [{"model": "relay-model", "task": "test task", "status": "completed", "usage": None, "duration": 3}]
         text = "\n".join(row.text for row in render_rows(snapshot))
-        self.assertIn("未知用量 1 项", text)
-        self.assertIn("用量未知", text)
+        self.assertEqual(text.count("未返回用量"), 1)
+        self.assertIn("1 完成", text)
+
+    def test_quotas_use_window_length_and_show_remaining_with_local_reset(self):
+        snapshot = self.snapshot()
+        reset = 1792476628
+        snapshot["root"]["rate_limits"] = {"limit_id": "codex",
+            "primary": {"window_minutes": 10080, "used_percent": 17, "resets_at": reset},
+            "secondary": {"window_minutes": 300, "used_percent": 92, "resets_at": reset}}
+        rows = render_rows(snapshot)
+        weekly = next(row for row in rows if "周额度" in row.text)
+        hourly = next(row for row in rows if "5小时" in row.text)
+        self.assertIn("剩余 83%", weekly.text)
+        self.assertIn(datetime.fromtimestamp(reset).strftime("%m/%d %H:%M") + " 重置", weekly.text)
+        self.assertIn("剩余 8%", hourly.text)
+        self.assertTrue(any("█" in text and kind == "bad" for text, kind in hourly.spans))
+        snapshot["root"]["rate_limits"]["secondary"] = None
+        self.assertFalse(any("5小时" in row.text for row in render_rows(snapshot)))
+
+    def test_missing_invalid_and_expired_quotas_never_become_full_allowance(self):
+        snapshot = self.snapshot()
+        for used in (None, "17", True, float("nan"), float("inf"), -1):
+            snapshot["root"]["rate_limits"] = {"primary": {"window_minutes": 300, "used_percent": used}}
+            self.assertEqual(render_rows(snapshot), [])
+        snapshot["root"]["rate_limits"] = {"primary": {"window_minutes": 300, "used_percent": 92, "resets_at": 99}}
+        text = "\n".join(row.text for row in render_rows(snapshot))
+        self.assertIn("等待额度更新", text)
+        self.assertNotIn("剩余", text)
 
     def test_bars_and_clipping_respect_terminal_cells(self):
         for fraction in (-.1, 0, .03, .5, 1, 1.2):

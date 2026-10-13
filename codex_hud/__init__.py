@@ -1,3 +1,3 @@
 """Read-only telemetry for the official Codex CLI."""
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"

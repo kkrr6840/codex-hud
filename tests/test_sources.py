@@ -91,7 +91,7 @@ class SourcesTest(unittest.TestCase):
         second = collector.collect()
         self.assertEqual(len(second["offload"]["jobs"]), 1)
         self.assertIsNone(second["offload"]["jobs"][0]["usage"])
-        self.assertIn("未知用量 1 项", "\n".join(text for text, kind in lines(second)))
+        self.assertIn("未返回用量", "\n".join(text for text, kind in lines(second)))
 
     def test_partial_json_tail_and_actual_window_not_configuration(self):
         path = self.thread("root-A")
@@ -108,9 +108,59 @@ class SourcesTest(unittest.TestCase):
         self.assertEqual(data["context_window"], 100)
         self.assertEqual(data["usage"]["total_tokens"], 200)
 
+    def test_partial_first_line_is_retried_before_advancing_offset(self):
+        path = self.home / "partial.jsonl"
+        meta = json.dumps({"type": "session_meta", "payload": {"id": "root-A"}}) + "\n"
+        path.write_text(meta[:20])
+        reader = Rollout(path)
+        self.assertEqual(reader.refresh(), {})
+        self.assertEqual(reader.offset, 0)
+        with path.open("a") as handle:
+            handle.write(meta[20:])
+        self.assertEqual(reader.refresh()["id"], "root-A")
+
     def test_agent_identity_uses_id_not_inherited_session_id(self):
         path = self.thread("child-A", "root-A")
         self.assertEqual(Rollout(path).refresh()["id"], "child-A")
+
+    def test_quota_only_events_replace_missing_windows_and_stay_session_scoped(self):
+        first = Rollout(self.thread("root-A"))
+        second = Rollout(self.thread("root-B"))
+        first.refresh()
+        second.refresh()
+        limits = {"primary": {"window_minutes": 300, "used_percent": 12},
+                  "secondary": {"window_minutes": 10080, "used_percent": 17}}
+        def event(value):
+            return {"type": "event_msg", "payload": {"type": "token_count", "info": None, "rate_limits": value}}
+        first.consume(event(limits))
+        self.assertEqual(first.data["rate_limits"], limits)
+        self.assertNotIn("rate_limits", second.data)
+        first.consume(event({"primary": limits["secondary"], "secondary": None}))
+        self.assertIsNone(first.data["rate_limits"]["secondary"])
+        self.assertEqual(first.data["rate_limits"]["primary"]["window_minutes"], 10080)
+        first.consume(event(None))
+        self.assertIsNone(first.data["rate_limits"])
+
+    def test_explicit_thread_tokens_are_not_replaced_by_aggregate_or_child_usage(self):
+        reader = Rollout(self.thread("root-A"))
+        reader.refresh()
+        reader.consume({"type": "token_usage_record", "payload": {"thread_id": "root-A", "usage": {"input_tokens": 25}, "thread_token_usage": {"total_tokens": 100}}})
+        reader.consume({"type": "token_usage_record", "payload": {"thread_id": "child-A", "usage": {"input_tokens": 999}, "thread_token_usage": {"total_tokens": 99999}}})
+        reader.consume({"type": "event_msg", "payload": {"type": "token_count", "info": {"total_token_usage": {"total_tokens": 555}, "last_token_usage": {"input_tokens": 44}, "model_context_window": 100}}})
+        self.assertEqual(reader.data["usage"]["total_tokens"], 100)
+        self.assertEqual(reader.data["context_used"], 25)
+        self.assertEqual(reader.data["context_window"], 100)
+
+    def test_tool_activity_and_plan_are_scoped_to_the_recorded_thread(self):
+        reader = Rollout(self.thread("root-A"))
+        reader.refresh()
+        reader.consume({"type": "response_item", "timestamp": 100, "payload": {"type": "function_call", "name": "update_plan", "call_id": "plan1", "arguments": json.dumps({"plan": [{"step": "Test", "status": "in_progress"}]})}})
+        self.assertEqual(reader.data["todos"][0]["step"], "Test")
+        self.assertEqual(reader.data["tools"][0]["status"], "running")
+        reader.consume({"type": "response_item", "timestamp": 103, "payload": {"type": "function_call_output", "call_id": "plan1", "output": '{"exit_code":1}'}})
+        self.assertEqual(reader.data["tools"][0]["status"], "failed")
+        self.assertEqual(reader.data["tools"][0]["duration"], 3)
+        self.assertNotIn("tools", Rollout(self.thread("root-B")).refresh())
 
     def test_stale_interrupted_completed_and_unknown_are_distinct(self):
         self.assertEqual(turn_state({"status": "inProgress", "started_at": 1}, launched_at=50), "unknown")

@@ -182,6 +182,40 @@ f.close()
         self.send(spec, "quit")
         self.wait_for(lambda: not Path(spec["runtime"]).exists())
 
+    def test_live_preferences_hide_and_restore_without_restarting_cli(self):
+        spec = self.launch()
+        # Missing-database diagnostics intentionally stay visible even when
+        # every optional element is off; this fixture needs a healthy source.
+        import sqlite3
+        Path(spec["home"]).mkdir(parents=True, exist_ok=True)
+        with sqlite3.connect(Path(spec["home"]) / "state_5.sqlite") as db:
+            db.executescript("CREATE TABLE threads(id TEXT,source TEXT,rollout_path TEXT); CREATE TABLE thread_spawn_edges(parent_thread_id TEXT,child_thread_id TEXT,status TEXT);")
+        self.wait_for(lambda: self.snapshot(spec).get("root", {}).get("model") == "fixture-model")
+        pid = self.tmux(spec, "display-message", "-p", "-t", spec["top"], "#{pane_pid}").stdout.strip()
+        from codex_hud.config import ELEMENTS
+        config = Path(self.env["CODEX_HUD_CONFIG_HOME"]) / "display.json"
+        config.parent.mkdir(parents=True, exist_ok=True)
+        config.write_text(json.dumps({"show": {key: False for key in ELEMENTS}}))
+        def hidden():
+            return self.tmux(spec, "display-message", "-p", "-t", spec["top"], "#{window_id}").stdout != self.tmux(spec, "display-message", "-p", "-t", spec["hud"], "#{window_id}").stdout
+        self.wait_for(hidden)
+        config.write_text(json.dumps({"language": "en", "show": {"tokens": False}}))
+        self.wait_for(lambda: not hidden())
+        self.wait_for(lambda: "Context" in self.tmux(spec, "capture-pane", "-p", "-t", spec["hud"]).stdout)
+        panel = self.tmux(spec, "capture-pane", "-p", "-t", spec["hud"]).stdout
+        self.assertNotIn("Main tokens", panel)
+        self.assertEqual(self.tmux(spec, "display-message", "-p", "-t", spec["top"], "#{pane_pid}").stdout.strip(), pid)
+        self.assertIn("config --menu", self.tmux(spec, "list-keys", "-T", "prefix").stdout)
+        import shlex
+        menu = self.tmux(spec, "new-window", "-d", "-n", "settings-test", "-P", "-F", "#{pane_id}", shlex.join([sys.executable, str(ENTRY), "config", "--menu"])).stdout.strip()
+        self.wait_for(lambda: "Display settings" in self.tmux(spec, "capture-pane", "-p", "-t", menu).stdout)
+        self.tmux(spec, "send-keys", "-t", menu, "-l", " ")
+        self.wait_for(lambda: json.loads(config.read_text()).get("show", {}).get("model") is False)
+        self.tmux(spec, "send-keys", "-t", menu, "-l", "q")
+        self.tmux(spec, "kill-window", "-t", "settings-test")
+        self.send(spec, "quit")
+        self.wait_for(lambda: not Path(spec["runtime"]).exists())
+
 
 if __name__ == "__main__":
     unittest.main()

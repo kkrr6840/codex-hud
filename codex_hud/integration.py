@@ -199,6 +199,9 @@ def configure(argv):
                 "plugin_root": str(ROOT), "cache_plugin_dir": str(cache) if cache else None,
                 "plugin_key": key, "codex_home": str(home), "shell_rc": str(shell_rc), "rc_block": block}
     atomic_json(settings_path, settings)
+    if args.height is not None:
+        from .config import save
+        save({"height": args.height})
     print(json.dumps({"ok": True, "enabled": True, "height": height, "wrapper": str(wrapper),
                       "plugin": key, "effect": "新 shell 里的普通 codex 会自动显示 HUD；非交互命令保持原样"}, ensure_ascii=False))
     return 0
