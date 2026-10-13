@@ -1,0 +1,285 @@
+from __future__ import annotations
+
+import argparse
+import curses
+import json
+import os
+from pathlib import Path
+import shlex
+import shutil
+import signal
+import subprocess
+import sys
+import tempfile
+import time
+
+from .display import paint
+from .sources import Collector, atomic_json, read_json
+
+ROOT = Path(__file__).resolve().parent.parent
+ENTRY = ROOT / "codex-hud"
+
+
+def tmux(socket, *args, check=True):
+    return subprocess.run(["tmux", "-L", socket, *map(str, args)], check=check,
+                          capture_output=True, text=True, timeout=5)
+
+
+def command(*args):
+    return shlex.join([sys.executable, str(ENTRY), *map(str, args)])
+
+
+def launch(argv):
+    parser = argparse.ArgumentParser(prog="codex-hud", description="官方 Codex CLI + 独立 tmux 固定底部 HUD。CLI 参数可直接传入，或放在 -- 后。")
+    parser.add_argument("--detach", action="store_true", help="后台启动，打印附加命令")
+    parser.add_argument("--hud-height", type=int, default=11, help="底部行数，默认 11；Ctrl-b H 可展开")
+    parser.add_argument("--width", type=int, default=140, help="后台启动时的终端列数")
+    parser.add_argument("--height", type=int, default=40, help="后台启动时的终端行数")
+    # parse only HUD options; all other tokens remain official CLI arguments.
+    if "--" in argv:
+        split = argv.index("--")
+        options, extra = parser.parse_known_args(argv[:split])
+        cli_args = extra + argv[split + 1:]
+    else:
+        options, cli_args = parser.parse_known_args(argv)
+    if not shutil.which("tmux"):
+        parser.error("缺少 tmux，请运行 brew install tmux")
+    from .integration import resolve_codex
+    try:
+        executable = resolve_codex()
+    except RuntimeError as error:
+        parser.error(str(error))
+    if not options.detach and not sys.stdin.isatty():
+        parser.error("请在终端中运行；自动化测试可加 --detach")
+    if not 6 <= options.hud_height <= 30 or options.width < 40 or options.height < 16:
+        parser.error("--hud-height 需为 6–30；终端尺寸至少 40×16")
+    runtime = Path(tempfile.mkdtemp(prefix="codex-hud-", dir=os.environ.get("CODEX_HUD_RUNTIME_DIR")))
+    runtime.chmod(0o700)
+    socket = runtime.name
+    home = str(Path(os.environ.get("CODEX_HOME", Path.home() / ".codex")).expanduser().resolve())
+    # Only this invocation is standalone. Official binary, auth and config stay intact.
+    log_dir = runtime / "diagnostics"
+    log_dir.mkdir(mode=0o700)
+    arguments = [executable, "--no-daemon", "-c", f"log_dir={json.dumps(str(log_dir))}", *cli_args]
+    spec = {"socket": socket, "runtime": str(runtime), "home": home,
+            "cwd": os.getcwd(), "argv": arguments, "hud_height": options.hud_height,
+            "diagnostic": str(log_dir / "codex-tui.log")}
+    atomic_json(runtime / "spec.json", spec)
+    attached = False
+    watcher = None
+    try:
+        created = tmux(socket, "-f", "/dev/null", "new-session", "-d", "-s", "codex",
+                       "-x", options.width, "-y", options.height, "-c", os.getcwd(),
+                       "-P", "-F", "#{pane_id}", command("_run", runtime))
+        spec["top"] = created.stdout.strip()
+        tmux(socket, "set-option", "-g", "status", "off")
+        tmux(socket, "set-option", "-g", "mouse", "on")
+        tmux(socket, "set-option", "-g", "exit-empty", "on")
+        tmux(socket, "set-option", "-g", "remain-on-exit", "on")
+        tmux(socket, "set-option", "-g", "set-clipboard", "on")
+        tmux(socket, "set-option", "-g", "default-terminal", "tmux-256color")
+        tmux(socket, "set-option", "-g", "pane-border-style", "fg=colour238")
+        tmux(socket, "set-option", "-g", "pane-active-border-style", "fg=colour238")
+        size = min(options.hud_height, options.height // 2)
+        split = tmux(socket, "split-window", "-v", "-l", size, "-t", spec["top"],
+                     "-c", os.getcwd(), "-P", "-F", "#{pane_id}", command("_panel", runtime))
+        spec["hud"] = split.stdout.strip()
+        atomic_json(runtime / "spec.json", spec)
+        tmux(socket, "bind-key", "H", "run-shell", command("_toggle", runtime))
+        tmux(socket, "select-pane", "-t", spec["top"])
+        watcher = subprocess.Popen([sys.executable, str(ENTRY), "_watch", str(runtime)],
+                                   stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                   stderr=subprocess.DEVNULL, start_new_session=True)
+        atomic_json(runtime / "ready.json", {"ready": True})
+        # Wait until the panel owns cleanup before returning a detached handle.
+        for _ in range(60):
+            if (runtime / "panel.json").exists() or (runtime / "exit.json").exists():
+                break
+            time.sleep(0.05)
+        if options.detach:
+            print(json.dumps({**spec, "attach": shlex.join(["tmux", "-L", socket, "attach-session", "-t", "codex"])}, ensure_ascii=False))
+            return 0
+        attached = True
+        # Nested tmux users attach through a fresh client without modifying their server.
+        env = dict(os.environ)
+        env.pop("TMUX", None)
+        if env.get("TERM", "dumb") in ("", "dumb"):
+            env["TERM"] = "xterm-256color"
+        result = subprocess.run(["tmux", "-L", socket, "attach-session", "-t", "codex"], env=env)
+        outcome = read_json(runtime / "exit.json", {})
+        if outcome:
+            return outcome.get("code", result.returncode)
+        print(f"HUD 已分离，重新进入：tmux -L {socket} attach-session -t codex")
+        return result.returncode
+    except (OSError, subprocess.SubprocessError) as error:
+        tmux(socket, "kill-server", check=False)
+        shutil.rmtree(runtime, ignore_errors=True)
+        print(f"HUD 启动失败：{error}", file=sys.stderr)
+        return 1
+    finally:
+        # Ctrl-b d intentionally leaves the owned session running for reattachment.
+        if attached and (runtime / "exit.json").exists():
+            tmux(socket, "kill-server", check=False)
+            shutil.rmtree(runtime, ignore_errors=True)
+
+
+def runner(runtime):
+    runtime = Path(runtime)
+    spec = read_json(runtime / "spec.json")
+    # Do not let fast CLI commands close the only pane before setup finishes.
+    deadline = time.monotonic() + 15
+    while not (runtime / "ready.json").exists():
+        if time.monotonic() >= deadline:
+            atomic_json(runtime / "exit.json", {"code": 1, "time": time.time()})
+            return 1
+        time.sleep(0.05)
+    env = dict(os.environ)
+    # Never accidentally claim the launching Codex chat's thread.
+    for key in ("CODEX_THREAD_ID", "CODEX_SESSION_ID"):
+        env.pop(key, None)
+    env["CODEX_HUD_ACTIVE"] = "1"
+    env["CODEX_HUD_RUNTIME"] = str(runtime)
+    # This exact official span identifies session creation before any prompt.
+    env["RUST_LOG"] = env.get("RUST_LOG", "warn") + ",codex_core::session=info"
+    child = None
+    code = 1
+    def stop(signum, frame):
+        # The runner and its CLI share this pane's process group. tmux's pane
+        # teardown also sends HUP; forward it to the direct child promptly.
+        if child and child.poll() is None:
+            child.send_signal(signum)
+    signal.signal(signal.SIGHUP, stop)
+    signal.signal(signal.SIGTERM, stop)
+    try:
+        child = subprocess.Popen(spec["argv"], cwd=spec["cwd"], env=env, start_new_session=False)
+        atomic_json(runtime / "runner.json", {"pid": child.pid, "started": time.time()})
+        code = child.wait()
+    except KeyboardInterrupt:
+        code = 130
+    except OSError as error:
+        print(f"官方 CLI 启动失败: {error}", file=sys.stderr)
+    finally:
+        if child and child.poll() is None:
+            child.terminate()
+            try:
+                child.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                child.kill()
+                child.wait()
+        atomic_json(runtime / "exit.json", {"code": code, "time": time.time()})
+    return code
+
+
+def toggle(runtime):
+    spec = read_json(Path(runtime) / "spec.json")
+    zoomed = tmux(spec["socket"], "display-message", "-p", "-t", "codex", "#{window_zoomed_flag}").stdout.strip() == "1"
+    if zoomed:
+        tmux(spec["socket"], "resize-pane", "-Z")
+        tmux(spec["socket"], "select-pane", "-t", spec["top"])
+    else:
+        tmux(spec["socket"], "select-pane", "-t", spec["hud"])
+        tmux(spec["socket"], "resize-pane", "-Z")
+    return 0
+
+
+def panel(runtime):
+    runtime = Path(runtime)
+    atomic_json(runtime / "panel.json", {"pid": os.getpid()})
+    spec = read_json(runtime / "spec.json")
+    collector = Collector(home=spec["home"], diagnostic=spec.get("diagnostic"))
+    def ui(screen):
+        nonlocal spec
+        try:
+            curses.curs_set(0)
+        except curses.error:
+            pass
+        screen.nodelay(True)
+        screen.keypad(True)
+        if curses.has_colors():
+            curses.start_color()
+            curses.use_default_colors()
+            for i, color in enumerate([curses.COLOR_CYAN, curses.COLOR_YELLOW, curses.COLOR_GREEN, curses.COLOR_RED, curses.COLOR_WHITE], 1):
+                curses.init_pair(i, color, -1)
+        scroll, refresh, snapshot = 0, 0, None
+        while True:
+            if (runtime / "exit.json").exists():
+                break
+            key = screen.getch()
+            if key in (curses.KEY_DOWN, ord("j")):
+                scroll += 1
+            elif key in (curses.KEY_UP, ord("k")):
+                scroll = max(0, scroll - 1)
+            elif key in (curses.KEY_HOME, ord("g")):
+                scroll = 0
+            elif key in (curses.KEY_END, ord("G")):
+                scroll = 10**6
+            elif key == 27:
+                spec = read_json(runtime / "spec.json", spec)
+                zoomed = tmux(spec["socket"], "display-message", "-p", "#{window_zoomed_flag}").stdout.strip()
+                if zoomed == "1":
+                    tmux(spec["socket"], "resize-pane", "-Z")
+                tmux(spec["socket"], "select-pane", "-t", spec["top"])
+            if time.monotonic() - refresh >= 1 or snapshot is None:
+                spec = read_json(runtime / "spec.json", spec)
+                if spec.get("hud"):
+                    layout = tmux(spec["socket"], "display-message", "-p", "-t", spec["hud"],
+                                  "#{window_height} #{pane_height} #{window_zoomed_flag}", check=False).stdout.split()
+                    if len(layout) == 3 and layout[2] == "0":
+                        desired = min(spec["hud_height"], max(3, int(layout[0]) // 2))
+                        if int(layout[1]) != desired:
+                            tmux(spec["socket"], "resize-pane", "-t", spec["hud"], "-y", desired, check=False)
+                runner_info = read_json(runtime / "runner.json", {})
+                collector.runner = runner_info.get("pid")
+                collector.launched_at = runner_info.get("started")
+                snapshot = collector.collect()
+                if not snapshot["root"].get("cwd"):
+                    snapshot["root"]["cwd"] = spec["cwd"]
+                atomic_json(runtime / "snapshot.json", snapshot)
+                refresh = time.monotonic()
+            scroll = paint(screen, snapshot, scroll)
+            time.sleep(0.1)
+    try:
+        curses.wrapper(ui)
+    finally:
+        # Exiting the official CLI closes the entire private tmux server.
+        # A panel crash must not kill a still-running official CLI.
+        if not (runtime / "exit.json").exists():
+            atomic_json(runtime / "panel-error.json", {"message": "HUD 面板异常退出，CLI 仍可继续使用"})
+    return 0
+
+
+def watch(runtime):
+    """Cleanup outside tmux, so killing panes cannot interrupt cleanup itself."""
+    runtime = Path(runtime)
+    spec = read_json(runtime / "spec.json")
+    while runtime.exists():
+        if (runtime / "exit.json").exists():
+            tmux(spec["socket"], "kill-server", check=False)
+            time.sleep(0.5)
+            shutil.rmtree(runtime, ignore_errors=True)
+            break
+        if tmux(spec["socket"], "has-session", "-t", "codex", check=False).returncode:
+            shutil.rmtree(runtime, ignore_errors=True)
+            break
+        dead = tmux(spec["socket"], "display-message", "-p", "-t", spec["top"], "#{pane_dead}", check=False)
+        if dead.stdout.strip() == "1":
+            atomic_json(runtime / "exit.json", {"code": 1, "time": time.time(), "error": "CLI runner exited"})
+        time.sleep(0.5)
+    return 0
+
+
+def main(argv=None):
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if argv and argv[0] in ("setup", "configure"):
+        from .integration import configure
+        return configure(argv[1:])
+    if argv and argv[0] in ("_run", "_panel", "_toggle", "_watch"):
+        return {"_run": runner, "_panel": panel, "_toggle": toggle, "_watch": watch}[argv[0]](argv[1])
+    if argv and argv[0] == "inspect":
+        parser = argparse.ArgumentParser(prog="codex-hud inspect", description="只读输出指定会话的 HUD 数据")
+        parser.add_argument("--session", required=True)
+        parser.add_argument("--home")
+        args = parser.parse_args(argv[1:])
+        print(json.dumps(Collector(home=args.home, root_id=args.session).collect(), ensure_ascii=False, indent=2))
+        return 0
+    return launch(argv)
