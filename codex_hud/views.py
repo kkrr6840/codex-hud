@@ -220,6 +220,8 @@ class View:
         for name, items in [("agents", self.s["agents"]), ("offload", self.s["offload"]["jobs"])]:
             if not self.c["agents_show_completed"]:
                 items = [item for item in items if item.get("status") != "completed"]
+            if not self.c["agents_show_failed"]:
+                items = [item for item in items if item.get("status") != "failed"]
             if not self.show[name] or not items:
                 continue
             title = " Agents" if name == "agents" else " codex-x-codex"

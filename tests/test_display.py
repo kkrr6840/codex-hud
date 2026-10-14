@@ -37,12 +37,12 @@ class DisplayTest(unittest.TestCase):
         context = next(row for row in render_rows(snapshot) if "上下文" in row.text)
         self.assertTrue(any("█" in text and kind == "bad" for text, kind in context.spans))
 
-    def test_real_failures_and_unknown_returned_usage_remain_visible(self):
+    def test_source_errors_remain_visible_and_failed_usage_is_available_on_request(self):
         snapshot = self.snapshot()
         snapshot["errors"] = ["会话日志不可读"]
         self.assertIn("会话日志不可读", render_rows(snapshot)[0].text)
         snapshot["offload"]["jobs"] = [{"model": "relay-model", "task": "test task", "status": "failed", "usage": None, "duration": 3}]
-        text = "\n".join(row.text for row in render_rows(snapshot))
+        text = "\n".join(row.text for row in render_rows(snapshot, config={**DEFAULT, "agents_show_failed": True}))
         self.assertEqual(text.count("未返回用量"), 1)
         self.assertIn("1 失败", text)
 
@@ -56,17 +56,41 @@ class DisplayTest(unittest.TestCase):
         self.assertEqual(len(snapshot["agents"]), 8)
         self.assertEqual(len(snapshot["offload"]["jobs"]), 8)
         snapshot["agents"].append({"id": "active", "name": "still-running", "status": "running"})
-        snapshot["offload"]["jobs"].append({"id": "failed", "model": "failed-relay", "status": "failed"})
+        snapshot["offload"]["jobs"].append({"id": "unknown", "model": "unknown-relay", "status": "unknown"})
         rows = render_rows(snapshot)
         text = "\n".join(r.text for r in rows)
         self.assertIn("still-running", text)
-        self.assertIn("failed-relay", text)
+        self.assertIn("unknown-relay", text)
         self.assertNotIn("completed-native", text)
         self.assertNotIn("completed-relay", text)
         self.assertNotIn("+", text)
-        self.assertEqual([r.key for r in rows if r.key], [("native", "active"), ("relay", "failed")])
+        self.assertEqual([r.key for r in rows if r.key], [("native", "active"), ("relay", "unknown")])
         visible = render_rows(snapshot, config={**DEFAULT, "agents_show_completed": True})
         self.assertTrue(any(r.key == ("native", "0") for r in visible))
+
+    def test_failed_history_does_not_crowd_active_rows_counts_or_navigation(self):
+        snapshot = self.snapshot()
+        failed = [{"id": str(i), "name": "failed-native", "model": "failed-relay", "status": "failed"} for i in range(8)]
+        snapshot["agents"] = list(failed)
+        snapshot["offload"]["jobs"] = list(failed)
+        self.assertEqual(render_rows(snapshot), [])
+        snapshot["agents"].append({"id": "active", "name": "still-running", "status": "running"})
+        snapshot["offload"]["jobs"].append({"id": "unknown", "model": "unknown-relay", "status": "unknown", "usage": None})
+        rows = render_rows(snapshot)
+        text = "\n".join(r.text for r in rows)
+        self.assertIn("1 运行", text)
+        self.assertIn("1 未知", text)
+        self.assertIn("未返回用量", text)
+        self.assertNotIn("失败", text)
+        self.assertNotIn("+", text)
+        self.assertEqual([r.key for r in rows if r.key], [("native", "active"), ("relay", "unknown")])
+        # Failure data stays available for parent decisions and explicit inspection.
+        self.assertEqual(snapshot["agents"][0]["status"], "failed")
+        self.assertEqual(len(snapshot["agents"]), 9)
+        self.assertEqual(len(snapshot["offload"]["jobs"]), 9)
+        visible = render_rows(snapshot, config={**DEFAULT, "agents_show_failed": True})
+        self.assertTrue(any(r.key == ("native", "0") for r in visible))
+        self.assertTrue(any(r.key == ("relay", "0") for r in visible))
 
     def test_quotas_use_window_length_and_show_remaining_with_local_reset(self):
         snapshot = self.snapshot()

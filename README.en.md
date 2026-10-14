@@ -110,6 +110,8 @@ Details show live task, model, status, elapsed time, reported usage, recent tool
 
 Starting with v0.6.1, completed agents and relay jobs leave the bottom list automatically, including their counts and overflow rows. An open detail view remains available for reading the final result. To show completed history again, ask the hud skill to set `agents_show_completed=true`; no session restart is needed.
 
+Starting with v0.6.4, failed agents and relay jobs also leave the bottom list and counts by default. Failure records remain available to the parent conversation and historical inspection. Set `agents_show_failed=true` to display failed history again. Unknown states and HUD data-source errors remain visible.
+
 The viewer reads existing records without resuming an agent or acquiring its writer. It reads the last five assistant messages available in a 128 KB transcript tail and excludes inherited messages dated before the child session was created. Relay jobs can display their returned answer even when their worker transcript was not saved. Output outside the read window, encrypted records, and results not yet produced stay unavailable. Unknown usage stays unknown. For the complete native subagent conversation and continuing its work, use Codex's **`/subagents`** command.
 
 ## Data accuracy and limitations

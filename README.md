@@ -68,7 +68,7 @@ Windows 创建 `~/.local/bin/codex.cmd`，在已安装的 Windows PowerShell / P
 | 额度 | `quota_value`: used/remaining；`quota_style`: bar/text/compact；`reset_format`: relative/absolute/both/elapsed/elapsed_absolute；时制、秒、显示阈值、消耗速度提示 |
 | Git | dirty、ahead_behind、file_stats、worktree、wrap、push_warning、push_critical |
 | 样式 | 简体/繁体/英文、路径层数、模型简称/覆盖、力度文字/符号、提供商标签、自定义文字、颜色名/256 色/#rrggbb、单列宽进度条字符 |
-| 活动 | `tools_limit`、`agents_limit`、`agents_show_completed`、`tool_name_length`；工具显示最近至多 200 条记录的活动，不冒充全部历史 |
+| 活动 | `tools_limit`、`agents_limit`、`agents_show_completed`、`agents_show_failed`、`tool_name_length`；工具显示最近至多 200 条记录的活动，不冒充全部历史 |
 
 开发者也可使用 `codex-hud config --show quota_5h,quota_weekly --hide tokens`，或 `codex-hud config --set 'git.ahead_behind=true'`。预设只修改显示开关和布局，保留自定义颜色等其他设置。
 
@@ -107,6 +107,8 @@ Mac 的 `Ctrl-b H` 展开或收起整个面板，在展开视图中用方向键�
 原生子 agent 和当前会话关联的分流任务均可查看任务、模型、状态、耗时、用量、最近工具和最新可读输出。状态与输出持续刷新，长回答可用上下箭头滚动；不会重启主 CLI。默认占位提示以外的输入界面使用辅助入口。
 
 v0.6.1 起，已完成的子 agent 和分流任务自动从底部列表移除，计数和多余行同步收起；全部完成后对应区域隐藏。正在查看的详情仍可读完最终结果。若需要显示完成历史，可通过 hud skill 设置 `agents_show_completed=true`，不必重进会话。
+
+v0.6.4 起，失败的子 agent 和分流任务也默认从底部列表与计数移除。失败记录仍保留给主会话处理和历史排查；需要查看时可通过 hud skill 设置 `agents_show_failed=true`。未知状态和 HUD 数据读取错误继续显示。
 
 选择器只读取日志和已返回的分流结果，不重新启动或恢复子会话，因此不会额外抢占会话写入权。原生输出读取日志尾部最多 128 KB 中最近五段 assistant 记录；继承的、早于子会话创建时间的父会话记录会排除。未保存 worker 日志的分流任务可显示其实际返回的结果；超出读取范围、加密内容和尚未产生的输出会明确提示。未知用量保持未知。Codex 的原生 **`/subagents`** 也可切换到子 agent 的完整会话界面，并继续它的工作。
 
