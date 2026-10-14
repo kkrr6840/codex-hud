@@ -32,7 +32,7 @@ DEFAULT = {
     "reset_label": True, "clock_24h": True, "clock_seconds": False,
     "usage_pace": False, "usage_threshold": 0, "weekly_threshold": 0,
     "warning_percent": 70, "critical_percent": 90,
-    "tools_limit": 4, "agents_limit": 4, "tool_name_length": 32,
+    "tools_limit": 4, "agents_limit": 4, "agents_show_completed": False, "tool_name_length": 32,
     "git": {"dirty": True, "ahead_behind": False, "file_stats": False, "worktree": False, "wrap": False, "push_warning": 0, "push_critical": 0},
     "model_format": "full", "effort_format": "text", "model_override": "", "provider_name": "",
     "custom_text": "", "custom_position": "last",

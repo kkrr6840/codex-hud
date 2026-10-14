@@ -108,6 +108,8 @@ If your Mac terminal reserves Option, use plain Down or Ctrl-b then Down. Auxili
 
 Details show live task, model, status, elapsed time, reported usage, recent tools, and readable assistant output for native agents and correlated relay jobs. Up/Down scrolls long output. The main CLI keeps running throughout.
 
+Starting with v0.6.1, completed agents and relay jobs leave the bottom list automatically, including their counts and overflow rows. An open detail view remains available for reading the final result. To show completed history again, ask the hud skill to set `agents_show_completed=true`; no session restart is needed.
+
 The viewer reads existing records without resuming an agent or acquiring its writer. It reads the last five assistant messages available in a 128 KB transcript tail and excludes inherited messages dated before the child session was created. Relay jobs can display their returned answer even when their worker transcript was not saved. Output outside the read window, encrypted records, and results not yet produced stay unavailable. Unknown usage stays unknown. For the complete native subagent conversation and continuing its work, use Codex's **`/subagents`** command.
 
 ## Data accuracy and limitations

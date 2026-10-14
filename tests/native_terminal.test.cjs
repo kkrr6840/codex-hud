@@ -114,6 +114,23 @@ test('Up from first agent returns to input; typing resumes native editing', () =
   assert.equal(controller.mode, 'cli');
 });
 
+test('completed row disappears without closing an open final-output detail', () => {
+  const controller = new hud.HudController();
+  controller.update(packet()); controller.enterHud();
+  controller.input(input('\r', 'enter'), true);
+  const finished = packet('root-a', []);
+  finished.snapshot.agents = [{ id: 'a', status: 'completed' }];
+  controller.update(finished);
+  assert.equal(controller.mode, 'detail');
+  controller.update({ type: 'detail', request_id: controller.pendingDetail, root: 'root-a', key: ['native', 'a'], lines: ['Final answer'] });
+  assert.ok(controller.overlayLines(10, 80).includes('Final answer'));
+  controller.input(input('\x1b', 'escape'), false);
+  assert.equal(controller.mode, 'cli');
+  assert.equal(controller.selected, null);
+  controller.update(packet()); controller.enterHud(); controller.update(finished);
+  assert.equal(controller.mode, 'cli', 'selection returns to input when the selected row completes');
+});
+
 test('detail refresh rejects stale requests and root changes clear selection', () => {
   const requests = [], controller = new hud.HudController(request => requests.push(request));
   controller.update(packet()); controller.enterHud(); controller.input(input('\r', 'enter'), true);
@@ -381,6 +398,8 @@ test('real PTY and Python bridge read SQLite-correlated Chinese agent output wit
   const root = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', child = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
   fs.mkdirSync(runtime, { recursive: true, mode: 0o700 });
   fs.mkdirSync(config, { recursive: true, mode: 0o700 });
+  // This transcript-inspection fixture intentionally opts into completed history.
+  fs.writeFileSync(path.join(config, 'display.json'), JSON.stringify({ agents_show_completed: true }));
   const environment = { ...process.env, CODEX_HOME: home, CODEX_HUD_CONFIG_HOME: config,
     CODEX_HUD_NODE_HOME: path.join(repository, 'native'), CODEX_X_CODEX_HOME: path.join(work, '私有分流'),
     PYTHONUTF8: '1', PYTHONIOENCODING: 'utf-8', CODEX_HUD_NATIVE_DEBUG: '1' };

@@ -281,7 +281,9 @@ class HudController {
       this.snapshot = packet.snapshot || {};
       this.rows = Array.isArray(packet.rows) ? packet.rows : [];
       this.allRows = Array.isArray(packet.all_rows) ? packet.all_rows : this.rows;
-      if (this.selected && !this.selectable().some(row => keyId(row.key) === keyId(this.selected))) {
+      const inspectingRecordedAgent = this.mode === 'detail' && this.selected &&
+        (this.selected[0] === 'native' ? this.snapshot.agents : this.snapshot.offload?.jobs)?.some(item => item.id === this.selected[1]);
+      if (this.selected && !this.selectable().some(row => keyId(row.key) === keyId(this.selected)) && !inspectingRecordedAgent) {
         this.selected = null; this.mode = 'cli'; this.pendingDetail = null;
       }
       if (this.mode === 'detail') this.requestDetail();
@@ -315,7 +317,7 @@ class HudController {
     }
     if (token.name === 'interrupt') { this.mode = 'cli'; this.selected = null; return { consumed: false }; }
     if (token.name === 'escape') {
-      if (this.mode === 'detail') this.mode = 'hud';
+      if (this.mode === 'detail' && this.selectable().some(row => keyId(row.key) === keyId(this.selected))) this.mode = 'hud';
       else { this.mode = 'cli'; this.selected = null; }
       return { consumed: true };
     }
