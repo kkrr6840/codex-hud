@@ -1,6 +1,10 @@
 # Codex HUD
 
+[简体中文](README.md) | [English](README.en.md)
+
 为官方 Codex CLI 添加固定底部 HUD。安装并配置一次后，照常运行 `codex`，HUD 自动出现，无需每次运行 `codex-hud` 或手动接入 tmux。
+
+**English:** A persistent terminal HUD for the official Codex CLI. See the selected model, context and quota progress bars, token usage, Git status, and session-scoped agent activity in a compact bottom panel. Install it through the Codex plugin manager, configure it once, and keep using `codex` as usual. [English setup and usage →](README.en.md)
 
 ![Codex plugin](https://img.shields.io/badge/Codex-plugin-blue) ![License](https://img.shields.io/badge/license-MIT-green)
 
