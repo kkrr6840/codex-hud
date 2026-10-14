@@ -117,6 +117,9 @@ class SourcesTest(unittest.TestCase):
         second = collector.collect()
         self.assertEqual(len(second["offload"]["jobs"]), 1)
         self.assertIsNone(second["offload"]["jobs"][0]["usage"])
+        self.assertNotIn("未返回用量", "\n".join(text for text, kind in lines(second)))
+        from codex_hud.config import DEFAULT
+        second["display"] = {**DEFAULT, "agents_show_completed": True}
         self.assertIn("未返回用量", "\n".join(text for text, kind in lines(second)))
 
     def test_partial_json_tail_and_actual_window_not_configuration(self):
