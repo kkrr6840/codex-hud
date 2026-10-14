@@ -331,8 +331,8 @@ setTimeout(update,150); setInterval(update,150);
     ...(process.platform === 'win32' ? {} : { encoding: 'utf8' }), conptyInheritCursor: false
   });
   const terminal = new Terminal({ cols: 80, rows: 24, allowProposedApi: true });
-  let exited = false, exitCode, rendered = '', replies = '', failure;
-  outer.onData(data => { rendered += data; terminal.write(data); });
+  let exited = false, exitCode, rendered = '', replies = '', failure, lastOutput = Date.now();
+  outer.onData(data => { lastOutput = Date.now(); rendered += data; terminal.write(data); });
   terminal.onData(data => { replies += data; outer.write(data); });
   outer.onExit(event => { exited = true; exitCode = event.exitCode; });
   const visible = () => Array.from({ length: terminal.rows }, (_, y) => terminal.buffer.active.getLine(terminal.buffer.active.viewportY + y)?.translateToString(true) || '').join('\n');
@@ -352,6 +352,9 @@ setTimeout(update,150); setInterval(update,150);
     const envRecord = JSON.parse(fs.readFileSync(inputLog, 'utf8').split('\n')[0]);
     assert.equal(envRecord.env.thread, undefined); assert.equal(envRecord.env.session, undefined);
     assert.equal(envRecord.env.active, '1'); assert.equal(envRecord.env.log, 'warn,codex_core::session=info');
+    // ConPTY can show the old composer while the HUD's initial resize is
+    // still reaching the CLI. Press only after that redraw has settled.
+    await until(() => visible().includes('› Ask Codex') && Date.now() - lastOutput >= 100, 'resized empty composer settled');
     outer.write(`${CSI}B`);
     await until(selected, 'Down selected agent in the bottom HUD');
     assert.ok(!inputs().includes(`${CSI}B`), 'empty Down was not delivered to official CLI');
