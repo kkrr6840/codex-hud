@@ -7,7 +7,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from codex_hud.integration import interactive, resolve_codex
+from codex_hud.integration import interactive, resolve_codex, entrypoint_plan, replace_link
 from codex_hud.bootstrap import installed_root, read_settings
 
 ENTRY = Path(__file__).resolve().parents[1] / "codex-hud"
@@ -38,6 +38,74 @@ class IntegrationTest(unittest.TestCase):
     def setup(self, *args):
         return subprocess.run([sys.executable, str(ENTRY), "setup", *args], env=self.env,
                               capture_output=True, text=True, timeout=5)
+
+    def npm_entry(self, name="package"):
+        package = self.base / name
+        (package / "bin").mkdir(parents=True)
+        target = package / "bin/codex.js"
+        target.write_bytes(Path(self.env["CODEX_HUD_REAL_CLI"]).read_bytes())
+        target.chmod(0o755)
+        (package / "package.json").write_text(json.dumps({"name": "@openai/codex", "bin": {"codex": "bin/codex.js"}}))
+        entry = self.base / "official/codex"
+        entry.unlink()
+        entry.symlink_to(os.path.relpath(target, entry.parent))
+        return entry, target
+
+    def test_old_entry_reaches_launcher_and_uninstall_restores_original_link(self):
+        entry, target = self.npm_entry()
+        original = os.readlink(entry)
+        content = target.read_bytes()
+        for _ in range(2):
+            self.assertEqual(self.setup("--enable").returncode, 0)
+        self.assertEqual(os.readlink(entry), str(self.base / "local-bin/codex"))
+        cfg = json.loads((self.base / "settings/settings.json").read_text())
+        self.assertEqual(cfg["real_cli"], str(target.resolve()))
+        self.assertEqual(cfg["entrypoint_bridge"]["original_target"], original)
+        for action in ("--enable", "--disable"):
+            self.assertEqual(self.setup(action).returncode, 0)
+            result = subprocess.run([str(entry), "exec", "spaces and 'quotes'", "--fixture-error"], env=dict(self.env, HTTP_PROXY="fixture-proxy"), capture_output=True, text=True, timeout=5)
+            self.assertEqual(result.returncode, 23)
+            self.assertEqual(json.loads(result.stdout)["proxy"], "fixture-proxy")
+            self.assertEqual(json.loads(result.stdout)["argv"], ["exec", "spaces and 'quotes'", "--fixture-error"])
+        # The compatibility entry must also survive loss of Python support.
+        old_python = self.base / "python-bin"
+        old_python.mkdir()
+        (old_python / "python3").write_text("#!/bin/sh\nexit 1\n")
+        (old_python / "python3").chmod(0o755)
+        result = subprocess.run([str(entry), "--version"], env=dict(self.env, PATH=str(old_python) + os.pathsep + self.env["PATH"]), capture_output=True, text=True, timeout=5)
+        self.assertEqual(json.loads(result.stdout)["argv"], ["--version"])
+        self.assertEqual(self.setup("--uninstall").returncode, 0)
+        self.assertEqual(os.readlink(entry), original)
+        self.assertEqual(target.read_bytes(), content)
+
+    def test_package_update_retargets_bridge_and_uninstall_preserves_user_replacement(self):
+        entry, old = self.npm_entry()
+        self.assertEqual(self.setup("--enable").returncode, 0)
+        # Model npm replacing its bin link with a different package version.
+        entry.unlink()
+        entry.symlink_to(old)
+        entry, new = self.npm_entry("updated-package")
+        original = os.readlink(entry)
+        self.assertEqual(self.setup("--enable").returncode, 0)
+        cfg = json.loads((self.base / "settings/settings.json").read_text())
+        self.assertEqual(cfg["real_cli"], str(new.resolve()))
+        self.assertEqual(cfg["entrypoint_bridge"]["original_target"], original)
+        entry.unlink()
+        entry.write_text("user replacement")
+        self.assertEqual(self.setup("--uninstall").returncode, 0)
+        self.assertEqual(entry.read_text(), "user replacement")
+
+    def test_only_verified_entry_symlinks_are_bridged_and_changes_are_preserved(self):
+        entry, target = self.npm_entry()
+        wrapper = self.base / "local-bin/codex"
+        (target.parent.parent / "package.json").write_text(json.dumps({"name": "@openai/codex", "bin": {"codex": "different.js"}}))
+        self.assertIsNone(entrypoint_plan(str(entry), wrapper, {})[1])
+        before = os.readlink(entry)
+        entry.unlink()
+        entry.write_text("changed concurrently")
+        with self.assertRaises(RuntimeError):
+            replace_link(entry, str(wrapper), before)
+        self.assertEqual(entry.read_text(), "changed concurrently")
 
     def test_classifier_respects_values_commands_and_prompt_delimiter(self):
         yes = [[], ["a normal prompt"], ["-m", "exec"], ["-c", "name='review'", "resume", "--last"], ["--", "exec"], ["fork", "thread-id"]]

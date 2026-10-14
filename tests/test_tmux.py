@@ -155,17 +155,37 @@ f.close()
 
     @unittest.skipUnless(sys.platform == "darwin", "macOS BSD script PTY test")
     def test_plain_codex_automatically_opens_hud_without_attach_command(self):
+        self.assert_auto_launch()
+
+    @unittest.skipUnless(sys.platform == "darwin", "macOS BSD script PTY test")
+    def test_cached_codex_in_already_open_shell_opens_hud_without_rehash(self):
+        package = self.base / "npm-package"
+        (package / "bin").mkdir(parents=True)
+        target = package / "bin/codex.js"
+        shutil.copy2(self.bin / "codex", target)
+        (package / "package.json").write_text(json.dumps({"name": "@openai/codex", "bin": {"codex": "bin/codex.js"}}))
+        (self.bin / "codex").unlink()
+        (self.bin / "codex").symlink_to(target)
+        self.assert_auto_launch(cached=True)
+
+    def assert_auto_launch(self, cached=False):
         Path(self.env["CODEX_HUD_SHELL_RC"]).write_text('codex() { HTTP_PROXY="http://fixture.invalid" command codex "$@"; }\n')
-        result = subprocess.run([sys.executable, str(ENTRY), "setup", "--enable"],
-                                env=self.env, capture_output=True, text=True, timeout=5)
-        self.assertEqual(result.returncode, 0, result.stderr)
+        if not cached:
+            result = subprocess.run([sys.executable, str(ENTRY), "setup", "--enable"],
+                                    env=self.env, capture_output=True, text=True, timeout=5)
+            self.assertEqual(result.returncode, 0, result.stderr)
         runtimes = self.base / "runtimes"
         runtimes.mkdir()
-        env = dict(self.env, CODEX_HUD_RUNTIME_DIR=str(runtimes), TERM="xterm-256color")
+        env = dict(self.env, CODEX_HUD_RUNTIME_DIR=str(runtimes), TERM="xterm-256color",
+                   HUD_TEST_PYTHON=sys.executable, HUD_TEST_ENTRY=str(ENTRY))
         # BSD script owns the PTY lifecycle. Avoid Python pty.fork on macOS,
         # where forking a framework-linked interpreter can leave an exit hang.
         output = (self.base / "terminal-output.log").open("wb")
-        proc = subprocess.Popen(["/usr/bin/script", "-q", "/dev/null", "/bin/zsh", "-f", "-c", 'source "$CODEX_HUD_SHELL_RC"; codex'],
+        script = 'source "$CODEX_HUD_SHELL_RC"; '
+        if cached:
+            script += 'codex --help; "$HUD_TEST_PYTHON" "$HUD_TEST_ENTRY" setup --enable; '
+        script += 'codex'
+        proc = subprocess.Popen(["/usr/bin/script", "-q", "/dev/null", "/bin/zsh", "-f", "-c", script],
                                 cwd=self.base, env=env, stdin=subprocess.PIPE,
                                 stdout=output, stderr=subprocess.STDOUT)
         self.pty_children.append((proc, output))

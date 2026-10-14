@@ -549,6 +549,17 @@ class Collector:
                 for key in ("model", "cwd"):
                     if not root.get(key):
                         root[key] = rows.get(self.root_id, {}).get(key)
+                # The thread record tracks the current selection immediately;
+                # turn_context describes the last request and can lag a /model
+                # change indefinitely. Never use the global default here: other
+                # terminals can have independent model/effort selections.
+                selected = rows.get(self.root_id, {})
+                if isinstance(selected.get("model"), str) and selected["model"]:
+                    root["model"] = selected["model"]
+                    if "reasoning_effort" in selected:
+                        root.pop("effort", None)
+                        if selected["reasoning_effort"]:
+                            root["effort"] = selected["reasoning_effort"]
                 owners = list(rows) or [self.root_id]
                 if history:
                     for owner in owners:

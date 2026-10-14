@@ -8,6 +8,7 @@ from pathlib import Path
 import shlex
 import shutil
 import sys
+import tempfile
 import tomllib
 
 from .sources import atomic_json, read_json
@@ -118,6 +119,82 @@ def wrapper_text(real, bootstrap):
             + "exec " + shlex.quote(real) + ' "$@"\n')
 
 
+def link_target(path):
+    """Read the link itself, without following a possibly broken destination."""
+    try:
+        return os.readlink(path)
+    except (OSError, ValueError):
+        return None
+
+
+def links_to(path, destination):
+    target = link_target(path)
+    return target is not None and os.path.abspath(Path(path).parent / target) == os.path.abspath(destination)
+
+
+def saved_bridge(current):
+    bridge = current.get("entrypoint_bridge")
+    if bridge is not None and (not isinstance(bridge, dict) or any(
+            not isinstance(bridge.get(key), str) or not bridge[key]
+            for key in ("path", "original_target", "launcher"))
+            or not Path(bridge["path"]).is_absolute() or not Path(bridge["launcher"]).is_absolute()):
+        raise RuntimeError("入口恢复记录无效；保留现有入口，请检查 HUD settings.json")
+    return bridge
+
+
+def replace_link(path, target, expected):
+    """Never replace a file or a link changed by the package manager/user."""
+    path = Path(path)
+    if link_target(path) != expected:
+        raise RuntimeError(f"{path} 的入口已变化，请重新运行配置")
+    fd, pending = tempfile.mkstemp(prefix=".codex-hud-", dir=path.parent)
+    os.close(fd)
+    try:
+        os.unlink(pending)
+        os.symlink(target, pending)
+        if link_target(path) != expected:
+            raise RuntimeError(f"{path} 的入口已变化，请重新运行配置")
+        os.replace(pending, path)
+    finally:
+        if os.path.lexists(pending):
+            os.unlink(pending)
+
+
+def entrypoint_plan(real, wrapper, current):
+    """Bridge only owned, verified npm bin symlinks. Package files stay intact.
+
+    zsh caches the pathname, so keeping that pathname catches old shells too.
+    The original link is recorded before replacement for crash-safe recovery.
+    """
+    previous = saved_bridge(current)
+    entry = Path(previous["path"] if previous else real).absolute()
+    if previous and links_to(entry, previous["launcher"]):
+        if os.path.abspath(wrapper) != previous["launcher"]:
+            raise RuntimeError("请先移除旧启动包装，再更换 CODEX_HUD_BIN_DIR")
+        return real, previous, False
+    target = link_target(entry)
+    if target is None or entry == wrapper.absolute():
+        return real, previous, False
+    resolved = entry.resolve()
+    package = read_json(resolved.parent.parent / "package.json", {})
+    bins = package.get("bin", {}) if isinstance(package, dict) else {}
+    bin_path = bins.get("codex") if isinstance(bins, dict) else bins
+    if (not isinstance(package, dict) or package.get("name") != "@openai/codex"
+            or not isinstance(bin_path, str)
+            or (resolved.parent.parent / bin_path).resolve() != resolved
+            or not resolved.is_file() or not os.access(resolved, os.X_OK)
+            or entry.lstat().st_uid != os.getuid() or not os.access(entry.parent, os.W_OK)):
+        return real, previous, False
+    bridge = {"path": str(entry), "original_target": target, "launcher": str(wrapper.absolute())}
+    return str(resolved), bridge, True
+
+
+def restore_entrypoint(current):
+    bridge = saved_bridge(current)
+    if bridge and links_to(bridge["path"], bridge["launcher"]):
+        replace_link(bridge["path"], bridge["original_target"], link_target(bridge["path"]))
+
+
 def configure(argv):
     parser = argparse.ArgumentParser(prog="codex-hud setup", description="安装或配置一次自动 HUD；普通 codex 交互启动后自动显示")
     action = parser.add_mutually_exclusive_group()
@@ -138,6 +215,11 @@ def configure(argv):
     if args.height is not None and not 6 <= args.height <= 30:
         parser.error("高度需为 6–30")
     if args.uninstall:
+        # Restore first: deleting the launcher first would leave a broken CLI.
+        try:
+            restore_entrypoint(current)
+        except (OSError, RuntimeError) as error:
+            parser.error(str(error))
         wrapper = Path(current.get("wrapper", Path.home() / ".local/bin/codex"))
         if is_shim(wrapper):
             wrapper.unlink()
@@ -167,6 +249,10 @@ def configure(argv):
         wrapper = Path(os.environ["CODEX_HUD_BIN_DIR"]) / "codex"
     if (wrapper.exists() or wrapper.is_symlink()) and not is_shim(wrapper):
         parser.error(f"{wrapper} 已有其他启动器，未覆盖；请为 HUD 指定 CODEX_HUD_BIN_DIR")
+    try:
+        real, bridge, replace_entry = entrypoint_plan(real, wrapper, current)
+    except (OSError, RuntimeError) as error:
+        parser.error(str(error))
     home = Path(os.environ.get("CODEX_HOME", Path.home() / ".codex")).expanduser().resolve()
     key = plugin_key(home)
     rc_root = Path(os.environ.get("ZDOTDIR", Path.home()))
@@ -198,10 +284,18 @@ def configure(argv):
     settings = {"enabled": True, "height": height, "real_cli": real, "wrapper": str(wrapper),
                 "plugin_root": str(ROOT), "cache_plugin_dir": str(cache) if cache else None,
                 "plugin_key": key, "codex_home": str(home), "shell_rc": str(shell_rc), "rc_block": block}
+    if bridge:
+        settings["entrypoint_bridge"] = bridge
     atomic_json(settings_path, settings)
+    if replace_entry:
+        try:
+            replace_link(bridge["path"], bridge["launcher"], bridge["original_target"])
+        except (OSError, RuntimeError) as error:
+            parser.error(str(error))
     if args.height is not None:
         from .config import save
         save({"height": args.height})
     print(json.dumps({"ok": True, "enabled": True, "height": height, "wrapper": str(wrapper),
-                      "plugin": key, "effect": "新 shell 里的普通 codex 会自动显示 HUD；非交互命令保持原样"}, ensure_ascii=False))
+                      "plugin": key, "entrypoint_bridge": bridge,
+                      "effect": "普通 codex 会自动显示 HUD；已有终端无需 rehash，下次进入即生效" if bridge and links_to(bridge["path"], bridge["launcher"]) else "新 shell 里的普通 codex 会自动显示 HUD；非交互命令保持原样"}, ensure_ascii=False))
     return 0

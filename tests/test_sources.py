@@ -78,6 +78,31 @@ class SourcesTest(unittest.TestCase):
         self.assertEqual(sum(j["usage"]["input_tokens"] for j in snapshot["offload"]["jobs"]), 579)
         self.assertFalse(snapshot["errors"])
 
+    def test_model_selection_refreshes_without_new_turn_and_is_thread_scoped(self):
+        path = self.thread("root-A")
+        self.thread("root-B")
+        self.state.execute("ALTER TABLE threads ADD COLUMN reasoning_effort TEXT")
+        self.state.commit()
+        before = path.read_bytes()
+        collector = Collector(home=self.home, root_id="root-A")
+        self.assertEqual(collector.collect()["root"]["model"], "actual-model")
+        self.state.execute("UPDATE threads SET model='selected-model',reasoning_effort='high' WHERE id='root-A'")
+        self.state.execute("UPDATE threads SET model='other-session-model' WHERE id='root-B'")
+        self.state.commit()
+        root = collector.collect()["root"]
+        self.assertEqual(root["model"], "selected-model")
+        self.assertEqual(root["effort"], "high")
+        self.assertEqual(path.read_bytes(), before)
+        self.state.execute("UPDATE threads SET reasoning_effort=NULL WHERE id='root-A'")
+        self.state.commit()
+        self.assertNotIn("effort", collector.collect()["root"])
+
+    def test_missing_selected_model_falls_back_to_last_request(self):
+        self.thread("root-A")
+        self.state.execute("UPDATE threads SET model=NULL WHERE id='root-A'")
+        self.state.commit()
+        self.assertEqual(Collector(home=self.home, root_id="root-A").collect()["root"]["model"], "actual-model")
+
     def test_update_running_job_without_duplicating_or_mixing_global_usage(self):
         self.thread("root-A", status="inProgress")
         self.job("root-A", "a", "inProgress")
