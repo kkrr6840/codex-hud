@@ -14,10 +14,13 @@ jobs:
     timeout-minutes: 15
     env:
       PYTHONUTF8: "1"
-      CODEX_HOME: ${{ runner.temp }}/codex-hud-empty-home
-      CODEX_HUD_CONFIG_HOME: ${{ runner.temp }}/codex-hud-empty-settings
     steps:
       - uses: actions/checkout@v4
+      - name: Isolate CLI and HUD settings
+        shell: pwsh
+        run: |
+          "CODEX_HOME=$(Join-Path $env:RUNNER_TEMP 'codex-hud-empty-home')" >> $env:GITHUB_ENV
+          "CODEX_HUD_CONFIG_HOME=$(Join-Path $env:RUNNER_TEMP 'codex-hud-empty-settings')" >> $env:GITHUB_ENV
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
