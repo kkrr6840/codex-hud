@@ -12,6 +12,14 @@ jobs:
   native-windows:
     runs-on: windows-latest
     timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - python: "3.11"
+            node: "22"
+          - python: "3.12"
+            node: "24"
     env:
       PYTHONUTF8: "1"
     steps:
@@ -23,15 +31,22 @@ jobs:
           "CODEX_HUD_CONFIG_HOME=$(Join-Path $env:RUNNER_TEMP 'codex-hud-empty-settings')" >> $env:GITHUB_ENV
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: ${{ matrix.python }}
       - uses: actions/setup-node@v4
         with:
-          node-version: "22"
+          node-version: ${{ matrix.node }}
           cache: npm
           cache-dependency-path: native/package-lock.json
       - name: Install native ConPTY dependencies
         shell: pwsh
         run: npm ci --prefix native --include=optional --no-audit --no-fund
+      - name: Install pinned official npm CLI for alias discovery regression
+        shell: pwsh
+        run: |
+          $cliPrefix = Join-Path $env:RUNNER_TEMP 'codex-hud-official-npm'
+          npm install --prefix $cliPrefix --no-audit --no-fund --ignore-scripts @openai/codex@0.162.1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          "CODEX_HUD_OFFICIAL_NPM_ROOT=$cliPrefix" >> $env:GITHUB_ENV
       - name: Verify portable Python behavior and Windows installation
         shell: pwsh
         run: |

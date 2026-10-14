@@ -26,6 +26,8 @@ Run `python3 <plugin-root>/codex-hud config --describe` to inspect the effective
 
 Preferences live in `~/.config/codex-hud/display.json`. Optional `override.json` in the same directory wins; never modify it on a routine configuration request. The configuration command reports whether that file is present; explain any override that prevents the requested effective change. Unknown existing settings survive updates.
 
+Text cache percentage merged with tokens is the default, including upgrades without an explicit cache preference. Preserve explicit `cache_style="bar"` and custom merge groups. Do not overwrite old style preferences merely to apply the new default.
+
 After a plugin update, an active HUD may still run the old code. `python3 <plugin-root>/codex-hud refresh --session <current-thread-id>` replaces only its observer and bindings. Check the returned runtime and retained CLI PID; do not restart or stop the main conversation.
 
 That code-refresh command applies to macOS tmux HUDs. Native Windows backend upgrades take effect on the next normal launch. Display preferences refresh live on both platforms. Windows supports `watch --session <ID> --once` for read-only data verification, without a curses viewer.
@@ -43,6 +45,8 @@ Quotas come from official current-thread rate-limit snapshots, not estimates fro
 Setup creates a transparent `codex` launcher in the user's local bin directory and adds one marked PATH block to the appropriate shell rc. For an owned, writable symlink verified as the official npm package's `bin.codex`, setup also bridges that existing entry to the launcher, preserving its original link for uninstall. Official package files, existing shell functions, proxy settings, authentication and CLI configuration are preserved. A pre-existing unrelated launcher is never overwritten. Read the returned `entrypoint_bridge` and effect; do not claim installation succeeded from a manifest alone.
 
 On Windows, setup creates a `codex.cmd` shim and marked PATH blocks in available PowerShell profiles. Read its returned `profile` / `profiles` and `native_node` paths. A new PowerShell / Windows Terminal tab loads these once; ordinary subsequent `codex` launches need no commands. Windows npm entry files and execution policy are preserved. Non-interactive passthrough waits for the official executable and returns its exit code.
+
+Windows v0.7.1 setup records `python_executable` from the running installer and pins that path in its launcher. Use an explicit working Python path when `python` resolves to an unavailable application alias; do not create a temporary python.cmd to work around it. After upgrading an existing Windows launcher, rerun setup once to replace codex.cmd. If its saved interpreter later disappears, the launcher warns and preserves the official CLI fallback and exit code; do not report HUD runtime success from enabled=true alone.
 
 After one-time setup, ordinary interactive `codex`, `codex resume` and `codex fork` automatically open with the fixed HUD. Non-interactive commands, redirected output, help/version queries and remote sessions use the original CLI. The CLI's approvals and network policy still apply. A bridged entry works even in old shells with cached paths: users do not need `rehash`. If a package update recreates its bin link, rerun setup to bridge the updated entry.
 

@@ -69,19 +69,26 @@ class WindowsSetupTest(unittest.TestCase):
     def settings(self):
         return json.loads((self.directory / "settings.json").read_text(encoding="ascii"))
 
-    def npm_package(self, optional=True, name="@openai/codex", declared="bin/codex.js"):
+    def npm_package(self, optional=True, name="@openai/codex", declared="bin/codex.js", arch="x64", alias=True):
         prefix = self.base / "npm"
         package = prefix / "node_modules/@openai/codex"
         (package / "bin").mkdir(parents=True)
         (package / "bin/codex.js").write_text("#!/usr/bin/env node\n", encoding="ascii")
-        (package / "package.json").write_text(json.dumps({"name": name, "bin": {"codex": declared}}), encoding="ascii")
+        optional_name = f"@openai/codex-win32-{arch}"
+        version = "0.162.1"
+        target_version = f"{version}-win32-{arch}" if alias else version
+        metadata = {"name": name, "version": version, "bin": {"codex": declared}}
+        if optional:
+            metadata["optionalDependencies"] = {optional_name: f"npm:@openai/codex@{target_version}" if alias else version}
+        (package / "package.json").write_text(json.dumps(metadata), encoding="ascii")
         shim = prefix / "codex.cmd"
         shim.write_text('@echo off\nnode "%~dp0\\node_modules\\@openai\\codex\\bin\\codex.js" %*\n', encoding="ascii")
-        vendor = prefix / "node_modules/@openai/codex-win32-x64" if optional else package
+        vendor = prefix / "node_modules" / optional_name if optional else package
         vendor.mkdir(parents=True, exist_ok=True)
         if optional:
-            (vendor / "package.json").write_text(json.dumps({"name": "@openai/codex-win32-x64"}), encoding="ascii")
-        real = pe_fixture(vendor / "vendor/x86_64-pc-windows-msvc/bin/codex.exe")
+            (vendor / "package.json").write_text(json.dumps({"name": "@openai/codex" if alias else optional_name, "version": target_version, "os": ["win32"], "cpu": [arch]}), encoding="ascii")
+        triple, machine = ("x86_64-pc-windows-msvc", 0x8664) if arch == "x64" else ("aarch64-pc-windows-msvc", 0xAA64)
+        real = pe_fixture(vendor / "vendor" / triple / "bin/codex.exe", machine)
         return shim, package, real
 
     def test_enable_idempotent_preserves_profile_proxy_and_official_exe(self):
@@ -90,6 +97,7 @@ class WindowsSetupTest(unittest.TestCase):
             self.assertEqual(self.configure("--enable"), 0)
         cfg = self.settings()
         self.assertEqual(cfg["real_cli"], str(self.real.resolve()))
+        self.assertEqual(cfg["python_executable"], sys.executable)
         self.assertTrue(cfg["enabled"])
         self.assertEqual(cfg["native_node"], str(self.directory / "native_node"))
         self.assertEqual(cfg["codex_home"], str(Path(self.env["CODEX_HOME"]).resolve()))
@@ -204,6 +212,31 @@ class WindowsSetupTest(unittest.TestCase):
             with patch.dict(os.environ, {"CODEX_HUD_REAL_CLI": str(package / "bin/codex.js")}):
                 self.assertEqual(setup.resolve_codex(), str(real.resolve()))
             self.assertEqual(shim.read_bytes(), content)
+
+    def test_legacy_optional_package_and_arm64_alias_are_supported(self):
+        shim, _, real = self.npm_package(alias=False)
+        self.assertEqual(setup._resolve_candidate(shim), str(real.resolve()))
+        shutil.rmtree(self.base / "npm")
+        shim, _, real = self.npm_package(arch="arm64")
+        with patch.object(setup, "_target", return_value=("arm64", "aarch64-pc-windows-msvc")):
+            self.assertEqual(setup._resolve_candidate(shim), str(real.resolve()))
+
+    def test_alias_metadata_version_platform_and_pe_architecture_must_match(self):
+        shim, package, real = self.npm_package()
+        optional = real.parents[3] / "package.json"
+        original = json.loads(optional.read_text())
+        for change in ({"name": "third-party"}, {"version": "0.162.0-win32-x64"}, {"os": ["linux"]}, {"cpu": ["arm64"]}):
+            optional.write_text(json.dumps({**original, **change}))
+            self.assertIsNone(setup._resolve_candidate(shim))
+        optional.write_text(json.dumps(original))
+        pe_fixture(real, machine=0xAA64)
+        self.assertIsNone(setup._resolve_candidate(shim))
+        pe_fixture(real)
+        metadata = json.loads((package / "package.json").read_text())
+        for spec in ("npm:third-party@0.162.1-win32-x64", "npm:@openai/codex@0.162.0-win32-x64", None):
+            metadata["optionalDependencies"]["@openai/codex-win32-x64"] = spec
+            (package / "package.json").write_text(json.dumps(metadata))
+            self.assertIsNone(setup._resolve_candidate(shim))
 
     def test_reject_unknown_npm_package_wrong_bin_and_false_executable(self):
         shim, package, _ = self.npm_package(name="third-party")
@@ -447,6 +480,7 @@ class NativeDependencyTest(unittest.TestCase):
                     setup.install_native_dependencies(base, base)
 
 
+@unittest.skipUnless(shutil.which("node"), "Node.js required for the Windows launcher")
 class BatchLauncherTest(unittest.TestCase):
     def test_ascii_encoded_paths_missing_bootstrap_fallback_and_argv(self):
         with tempfile.TemporaryDirectory(prefix="HUD 中文 ") as temp:
@@ -455,14 +489,27 @@ class BatchLauncherTest(unittest.TestCase):
             fixture.write_text("import json,os,sys\nprint(json.dumps({'argv':sys.argv[1:],'proxy':os.getenv('HTTP_PROXY')}))\nsys.exit(23)\n", encoding="ascii")
             text = setup.wrapper_text(sys.executable, base / "missing launcher.py")
             text.encode("ascii")
-            code = re.search(r'^python -c "(.+)" %\*', text, re.MULTILINE).group(1)
+            code = re.search(r'^node -e "(.+)" -- %\*', text, re.MULTILINE).group(1)
             args = [str(fixture), "", "spaces and 'quotes'", 'double"quote', "中文", "!value!", "--"]
-            result = subprocess.run([sys.executable, "-c", code, *args], env=dict(os.environ, HTTP_PROXY="fixture-proxy"), capture_output=True, text=True)
+            result = subprocess.run([shutil.which("node"), "-e", code, "--", *args], env=dict(os.environ, HTTP_PROXY="fixture-proxy"), capture_output=True, text=True)
             self.assertEqual(result.returncode, 23, result.stderr)
             self.assertEqual(json.loads(result.stdout), {"argv": args[1:], "proxy": "fixture-proxy"})
             self.assertIn("node -e", text)
             self.assertIn("process.argv.slice(1)", text)
             self.assertNotIn("CALL", text)
+
+    def test_missing_saved_interpreter_warns_and_preserves_official_exit_code(self):
+        with tempfile.TemporaryDirectory() as temp:
+            base = Path(temp)
+            fixture = base / "official.py"
+            fixture.write_text("import sys\nprint('OFFICIAL_VERSION')\nsys.exit(23)\n")
+            text = setup.wrapper_text(sys.executable, base / "launcher.py", base / "missing-python.exe")
+            code = re.search(r'^node -e "(.+)" -- %\*', text, re.MULTILINE).group(1)
+            result = subprocess.run([shutil.which("node"), "-e", code, "--", str(fixture), "--version"], capture_output=True, text=True)
+            self.assertEqual(result.returncode, 23, result.stderr)
+            self.assertIn("OFFICIAL_VERSION", result.stdout)
+            self.assertIn("Python", result.stderr)
+            self.assertIn("missing-python.exe", result.stderr)
 
 
 @unittest.skipUnless(os.name == "nt", "requires actual Windows cmd.exe/PowerShell")
@@ -535,8 +582,60 @@ class FakeCodex {
         node = shutil.which("node.exe") or shutil.which("node")
         self.assertIsNotNone(node)
         env = dict(self.env, PATH=str(Path(node).parent))
+        self.wrapper.write_bytes(setup.wrapper_text(sys.executable, self.bootstrap, self.base / "missing-python.exe").encode("ascii"))
         args = ["--version", "quoted spaces", "中文参数"]
         self.assert_forwarded(self.batch(args, env), args)
+
+    def test_saved_python_is_used_when_path_contains_batch_aliases_and_no_python_exe(self):
+        node = shutil.which("node.exe") or shutil.which("node")
+        self.assertIsNotNone(node)
+        aliases = self.base / "application aliases"
+        aliases.mkdir()
+        marker = self.base / "ALIAS_WAS_INVOKED"
+        for name in ("python.cmd", "py.cmd"):
+            (aliases / name).write_text(f'@echo off\r\n>"{marker}" echo invoked\r\nexit /b 0\r\n', encoding="utf-8")
+        self.bootstrap.write_text("import json,sys\nprint(json.dumps({'interpreter':sys.executable,'argv':sys.argv[1:]}))\nsys.exit(19)\n", encoding="ascii")
+        env = dict(self.env, PATH=str(aliases) + os.pathsep + str(Path(node).parent))
+        args = ["--version", "", "中文参数", 'double"quote', "!literal!", "100%"]
+        result = self.batch(args, env)
+        self.assertEqual(result.returncode, 19, result.stderr)
+        self.assertEqual(json.loads(result.stdout), {"interpreter": sys.executable, "argv": [str(self.fixture), *args]})
+        self.assertFalse(marker.exists(), "python.cmd must never take over batch control flow")
+
+    def test_cmd_node_python_chain_keeps_real_conpty_input_and_output(self):
+        node = shutil.which("node.exe") or shutil.which("node")
+        self.assertIsNotNone(node)
+        self.bootstrap.write_text("import sys\nready=sys.stdin.isatty() and sys.stdout.isatty()\nprint('HUD_TTY_OK' if ready else 'HUD_TTY_LOST',flush=True)\nline=sys.stdin.readline().strip() if ready else ''\nsys.exit(19 if ready and line=='quit' else 42)\n", encoding="ascii")
+        script = self.base / "real-conpty.cjs"
+        script.write_text("""
+const {pty}=require(process.argv[2]).loadDependencies();
+let output='',sent=false;
+const child=pty.spawn(process.argv[3],['/d','/v:off','/s','/c',process.argv[4]],{cols:90,rows:28,cwd:process.cwd(),env:process.env});
+const timer=setTimeout(()=>{try{child.kill();}catch{}process.exit(98);},15000);
+child.onData(data=>{output+=data;if(!sent&&output.includes('HUD_TTY_OK')){sent=true;child.write('quit\\r');}});
+child.onExit(event=>{clearTimeout(timer);try{child.kill();}catch{}process.stdout.write(JSON.stringify({code:event.exitCode,output}));});
+""", encoding="ascii")
+        comspec = os.environ.get("COMSPEC", r"C:\Windows\System32\cmd.exe")
+        command = '"' + subprocess.list2cmdline([str(self.wrapper), "--version"]) + '"'
+        result = subprocess.run([node,str(script),str(ROOT / "native/terminal.cjs"),comspec,command], cwd=self.base,env=self.env,capture_output=True,encoding="utf-8",timeout=25)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        data = json.loads(result.stdout)
+        self.assertEqual(data["code"], 19, data["output"])
+        self.assertIn("HUD_TTY_OK", data["output"])
+
+    def test_real_official_npm_alias_resolves_and_runs_the_requested_cli_version(self):
+        root = os.environ.get("CODEX_HUD_OFFICIAL_NPM_ROOT")
+        if not root:
+            self.skipTest("CI supplies a real pinned official npm package")
+        prefix = Path(root)
+        package = prefix / "node_modules/@openai/codex"
+        executable = setup._package_executable(package)
+        self.assertIsNotNone(executable)
+        self.assertEqual(setup._resolve_candidate(prefix / "codex.cmd"), executable)
+        self.assertEqual(setup._resolve_candidate(package / "bin/codex.js"), executable)
+        result = subprocess.run([executable, "--version"], env=self.env, capture_output=True, encoding="utf-8", timeout=20)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("0.162.1", result.stdout)
 
     def test_bootstrap_missing_still_uses_official_executable(self):
         self.bootstrap.unlink()

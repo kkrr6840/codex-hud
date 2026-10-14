@@ -51,7 +51,7 @@ def is_shim(path):
         return False
 
 
-def is_pe(path):
+def is_pe(path, machine=None):
     """Require a real PE executable, rather than trusting an .exe extension."""
     try:
         path = Path(path)
@@ -66,7 +66,8 @@ def is_pe(path):
                 return False
             handle.seek(offset)
             pe = handle.read(6)
-            return pe[:4] == b"PE\0\0" and struct.unpack("<H", pe[4:])[0] in (0x8664, 0xAA64)
+            actual = struct.unpack("<H", pe[4:])[0]
+            return pe[:4] == b"PE\0\0" and actual in ((machine,) if machine else (0x8664, 0xAA64))
     except (OSError, ValueError, struct.error):
         return False
 
@@ -78,6 +79,26 @@ def _target():
     if machine in ("amd64", "x86_64", "x64"):
         return "x64", "x86_64-pc-windows-msvc"
     raise RuntimeError(f"不支持的 Windows 架构：{machine}")
+
+
+def _matches_optional(package, metadata, optional_name, arch):
+    """npm aliases retain the target package's name, not the directory name."""
+    dependencies = package.get("optionalDependencies") or {}
+    spec = dependencies.get(optional_name) if isinstance(dependencies, dict) else None
+    if not isinstance(metadata, dict) or not isinstance(spec, str):
+        return False
+    name, version = optional_name, spec
+    if spec.startswith("npm:"):
+        name, separator, version = spec[4:].rpartition("@")
+        if not separator or name != "@openai/codex" or version != f"{package.get('version')}-win32-{arch}":
+            return False
+    if metadata.get("name") != name or metadata.get("version") != version:
+        return False
+    for key, expected in (("os", "win32"), ("cpu", arch)):
+        limits = metadata.get(key)
+        if limits is not None and (not isinstance(limits, list) or expected not in limits or "!" + expected in limits):
+            return False
+    return True
 
 
 def _package_executable(package_root, entry=None):
@@ -101,12 +122,12 @@ def _package_executable(package_root, entry=None):
     for ancestor in (package_root, *package_root.parents):
         for optional in (ancestor / "node_modules" / optional_name, ancestor / optional_name):
             metadata = _json(optional / "package.json", {})
-            if isinstance(metadata, dict) and metadata.get("name") == optional_name:
+            if _matches_optional(package, metadata, optional_name, arch):
                 vendors.append(optional / "vendor")
     vendors.append(package_root / "vendor")
     for vendor in vendors:
         executable = vendor / triple / "bin/codex.exe"
-        if is_pe(executable):
+        if is_pe(executable, 0x8664 if arch == "x64" else 0xAA64):
             return str(executable.resolve())
     return None
 
@@ -160,28 +181,30 @@ def _b64(value):
     return base64.b64encode(str(value).encode("utf-8")).decode("ascii")
 
 
-def wrapper_text(real, bootstrap):
+def wrapper_text(real, bootstrap, python_executable=None):
     # Keep the batch source ASCII even when the user's home contains Unicode.
-    # %* is expanded once; CALL and delayed expansion would change arguments.
+    # Node spawns the exact installation interpreter; never invoke PATH's
+    # python.cmd/py.cmd or Windows application aliases. %* expands only once.
+    python_executable = python_executable or sys.executable
     code = ("import base64,os,runpy,subprocess,sys;"
             f"real=base64.b64decode('{_b64(real)}').decode('utf-8');"
             f"bootstrap=base64.b64decode('{_b64(bootstrap)}').decode('utf-8');"
             "os.environ['CODEX_HUD_FALLBACK_CLI']=real;"
             "runpy.run_path(bootstrap,run_name='__main__') if os.path.isfile(bootstrap) "
             "else sys.exit(subprocess.call([real,*sys.argv[1:]]))")
-    fallback = (f"const real=Buffer.from('{_b64(real)}','base64').toString('utf8');"
-                "const r=require('child_process').spawnSync(real,process.argv.slice(1),{stdio:'inherit'});"
-                "if(r.error) console.error(r.error.message);"
-                "process.exit(r.status===null?127:r.status)")
+    warning = "Codex HUD: 安装时的 Python 不可用或低于 3.11；请重新运行 hud setup。本次使用官方 CLI，不显示 HUD。"
+    launcher = ("const spawn=require('child_process').spawnSync;"
+                "const decode=s=>Buffer.from(s,'base64').toString('utf8');"
+                f"const real=decode('{_b64(real)}'),python=decode('{_b64(python_executable)}'),code=decode('{_b64(code)}');"
+                "const args=process.argv.slice(1);"
+                "const finish=r=>{if(r.error)console.error(r.error.message);process.exit(r.status===null?127:r.status);};"
+                f"const fallback=()=>{{console.error(decode('{_b64(warning)}')+' '+python);finish(spawn(real,args,{{stdio:'inherit'}}));}};"
+                "const probe=spawn(python,['-c','import sys;sys.exit(sys.version_info < (3,11))'],{stdio:'ignore',windowsHide:true,timeout:5000});"
+                "if(probe.error||probe.status!==0)fallback();"
+                "const run=spawn(python,['-c',code,...args],{stdio:'inherit'});"
+                "if(run.error)fallback();else finish(run);")
     return (f"@echo off\r\nrem {SIGNATURE}\r\nsetlocal DisableDelayedExpansion\r\n"
-            'python -c "import sys;sys.exit(sys.version_info < (3,11))" >nul 2>nul\r\n'
-            "if not errorlevel 1 goto hud_python\r\n"
-            'py -3 -c "import sys;sys.exit(sys.version_info < (3,11))" >nul 2>nul\r\n'
-            "if not errorlevel 1 goto hud_py\r\n"
-            "goto hud_node\r\n:hud_python\r\n"
-            f'python -c "{code}" %*\r\nexit /b %errorlevel%\r\n'
-            f':hud_py\r\npy -3 -c "{code}" %*\r\nexit /b %errorlevel%\r\n'
-            f':hud_node\r\nnode -e "{fallback}" -- %*\r\nexit /b %errorlevel%\r\n')
+            f'node -e "{launcher}" -- %*\r\nexit /b %errorlevel%\r\n')
 
 
 def _powershell():
@@ -494,6 +517,7 @@ def configure(argv):
         cache = ROOT.parent if {"plugins", "cache"}.issubset(ROOT.parts) else None
         primary = profiles[0]
         settings = {"enabled": True, "height": height, "real_cli": real, "wrapper": str(wrapper),
+                    "python_executable": sys.executable,
                     "plugin_root": str(ROOT), "cache_plugin_dir": str(cache) if cache else None,
                     "plugin_key": key, "codex_home": str(home), "shell_rc": primary["shell_rc"],
                     "rc_block": primary["rc_block"], "profiles": profiles, "native_node": str(native_node)}

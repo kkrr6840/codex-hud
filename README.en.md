@@ -21,6 +21,10 @@ A persistent bottom panel for the official Codex CLI. Configure it once, then ke
 
 v0.7 adds the **focus** preset: hide model/effort/path already shown by the native CLI, keep context/quota bars and activity, and merge token totals with a compact cache percentage. Ask the hud skill to use focus, choose 4 in the Mac settings menu, or select focus in the Windows menu. Unrelated preferences stay intact. Idle Mac HUD frames no longer clear and repaint repeatedly; scrolling, selection, resize, and color changes still refresh.
 
+v0.7.1 makes the text cache percentage and token/cache merge the defaults, including existing configurations without explicit cache preferences. Explicit `cache_style="bar"`, merge groups, and manual overrides are retained.
+
+Windows v0.7.1 recognizes the official npm platform-package aliases and records the exact Python interpreter used for setup. The launcher uses that executable directly instead of PATH's `python`, `py`, batch shims, or application aliases. If it becomes unavailable, the launcher warns before falling back to the official CLI. Existing Windows installations must run the hud skill's automatic setup once after upgrading to replace their generated `codex.cmd`.
+
 ## Requirements
 
 Supports macOS and native Windows PowerShell / Windows Terminal. Git is required for Git status.

@@ -44,6 +44,8 @@ Windows 同样使用上面的插件安装命令。首次开启时，安装器下
 
 Windows 创建 `~/.local/bin/codex.cmd`，在已安装的 Windows PowerShell / PowerShell 7 profile 中加入带标记的 PATH 设置。首次配置后新开一次终端标签页，以后照常输入 `codex` 即可。中文路径、参数、代理环境和官方 CLI 退出码都会保留；不会更改 PowerShell 执行策略或覆盖 npm 的 `.ps1` / `.cmd`。
 
+v0.7.1 修复官方 npm 平台包的 alias 识别，支持 `@openai/codex-win32-x64` 目录内真实包名为 `@openai/codex` 的布局，并校验版本、平台和 PE 架构。Windows 安装器会记录本次 `sys.executable`；启动器使用这个 Python 的绝对路径，不再探测 PATH 中的 `python` / `py` 或应用别名。该解释器失效时会明确提示，再运行官方 CLI。升级已有安装后，重新调用 hud skill“开启自动 HUD”一次以更新已生成的 `codex.cmd`；不要仅凭 `enabled=true` 判断 HUD 已实际启动。
+
 **v0.4.1 起，官方 npm 符号链接入口支持旧终端直接生效，无需 `rehash`。** 安装器核对入口属于 `@openai/codex` 包的 `bin.codex`，且链接由当前用户拥有、目录可写后，把该链接接入 HUD 启动器。官方包文件保持原样，真实 CLI 路径和原链接会先保存；移除启动包装时自动恢复原链接。仅当链接仍由 HUD 管理时才恢复，保留 npm 升级或用户自行更换的入口。npm 更新如果重建了这个链接，可再次调用 hud skill“开启自动 HUD”以重新接入。
 
 配置结果中的 `entrypoint_bridge` 表示兼容入口是否启用。启用后，旧标签页里正常运行 `codex`、`codex resume` 或 `codex fork` 就自动带 HUD；已有 alias/代理函数调用这个入口的绝对路径也生效。已经运行且不在 tmux 中的 CLI 仍需退出并进入一次。
@@ -57,6 +59,8 @@ Windows 创建 `~/.local/bin/codex.cmd`，在已安装的 Windows PowerShell / P
 **按 Ctrl-b，松开后按大写 C** 打开设置菜单。Mac 中方向键选择、空格开关，`1/2/3/4` 选择精简/标准/完整/专注预设，`L` 切换布局、`G` 切换语言；Windows 中用 ↑/↓ 选择预设、Enter 应用，也可用 F8 打开。`Esc` 关闭。修改即时保存，约一秒后刷新，不用重新进入会话。两端均可通过 hud skill 修改全部设置。
 
 v0.7 的专注布局（`focus`）减少与原生界面重复的模型、力度和路径，合并 Token 与缓存百分比，保留上下文/额度进度条、Skills 和任务活动。可以直接对 hud skill 说“使用专注布局”。已有自定义设置保留；静止画面不再重复清屏绘制，滚动、选中、尺寸或颜色变化仍会刷新。
+
+v0.7.1 起，默认配置也使用文字缓存百分比，并尽量与 Token 合并显示。没有显示配置的新安装、没有指定缓存偏好的旧配置均自动采用新默认；显式 `cache_style="bar"`、合并布局和 `override.json` 保留。要恢复缓存进度条，可通过 hud skill 设置 `cache_style="bar"`。
 
 也可以在 `/skills` 选择 **hud**，直接说“只保留模型、上下文和额度”“隐藏分流”“显示 Git 领先落后”“用英文紧凑布局”。高级配置同样可通过这个 skill 修改，无需手改配置文件。
 

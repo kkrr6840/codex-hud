@@ -111,6 +111,40 @@ class ConfigTest(unittest.TestCase):
         self.assertIn("缓存 80%", text)
         self.assertFalse(load()[0]["show"]["project"])
 
+    def test_text_cache_is_default_for_new_install_and_existing_unconfigured_preferences(self):
+        for preferences in (None, {"language": "en", "agents_show_failed": False, "colors": {"model": "#123456"}}):
+            if preferences is None:
+                path().unlink(missing_ok=True)
+            else:
+                path().write_text(json.dumps(preferences))
+            config, error = load()
+            self.assertIsNone(error)
+            self.assertEqual(config["cache_style"], "text")
+            row = next(r for r in render_rows(self.snapshot(), config=config) if "80%" in r.text)
+            self.assertIn("Main tokens" if preferences else "主会话 Token", row.text)
+            self.assertFalse(any("█" in value and kind == "model" for value, kind in row.spans))
+            if preferences is None:
+                self.assertFalse(path().exists())
+            else:
+                self.assertEqual(json.loads(path().read_text()), preferences)
+
+    def test_explicit_cache_bar_and_custom_merge_groups_are_preserved(self):
+        preferences = {"cache_style": "bar", "merge_groups": [["context", "quota"]]}
+        path().write_text(json.dumps(preferences))
+        config, error = load()
+        self.assertIsNone(error)
+        self.assertEqual(config["cache_style"], "bar")
+        self.assertEqual(config["merge_groups"], preferences["merge_groups"])
+        row = next(r for r in render_rows(self.snapshot(), config=config) if "缓存" in r.text)
+        self.assertIn("800 / 1.0k", row.text)
+        self.assertNotIn("主会话 Token", row.text)
+        self.assertTrue(any("█" in value and kind == "model" for value, kind in row.spans))
+        override = path().with_name("override.json")
+        override.write_text('{"cache_style":"bar"}')
+        save({"cache_style": "text"})
+        self.assertEqual(load()[0]["cache_style"], "bar")
+        self.assertEqual(override.read_text(), '{"cache_style":"bar"}')
+
     def test_unchanged_frames_do_not_redraw_but_colors_size_and_scroll_do(self):
         class Screen:
             size = (3, 100)

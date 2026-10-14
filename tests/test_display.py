@@ -31,7 +31,7 @@ class DisplayTest(unittest.TestCase):
         self.assertIn("25%", context.text)
         self.assertIn("250 / 1.0k", context.text)
         self.assertIn("80%", cache.text)
-        self.assertIn("8.0k / 10.0k", cache.text)
+        self.assertIn("主会话 Token", cache.text)
         self.assertTrue(any("█" in text and kind == "good" for text, kind in context.spans))
         snapshot["root"]["context_used"] = 950
         context = next(row for row in render_rows(snapshot) if "上下文" in row.text)
