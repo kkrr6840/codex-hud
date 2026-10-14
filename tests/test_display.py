@@ -2,6 +2,7 @@ import unittest
 from datetime import datetime
 
 from codex_hud.display import render_rows, progress, cell_width, clip
+from codex_hud.config import DEFAULT
 
 
 class DisplayTest(unittest.TestCase):
@@ -64,7 +65,7 @@ class DisplayTest(unittest.TestCase):
         self.assertNotIn("completed-relay", text)
         self.assertNotIn("+", text)
         self.assertEqual([r.key for r in rows if r.key], [("native", "active"), ("relay", "failed")])
-        visible = render_rows(snapshot, config={"agents_show_completed": True})
+        visible = render_rows(snapshot, config={**DEFAULT, "agents_show_completed": True})
         self.assertTrue(any(r.key == ("native", "0") for r in visible))
 
     def test_quotas_use_window_length_and_show_remaining_with_local_reset(self):
