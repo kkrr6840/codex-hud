@@ -91,7 +91,7 @@ The `codex-hud` command above requires the standalone entry on your PATH. With o
 
 Preferences are stored in `~/.config/codex-hud/display.json`. An optional `override.json` takes precedence and is preserved during normal configuration. On macOS, **Ctrl-b H** expands or collapses the panel; arrows or `j` / `k` scroll it. Quit normally with `/quit` on either platform.
 
-After an upgrade, the hud skill can refresh the macOS observer while keeping the main CLI running. Windows backend upgrades apply on the next normal launch; display preferences update live on both platforms.
+After an upgrade, the hud skill can refresh the macOS observer while keeping the main CLI running. Starting with v0.6.3, open macOS sessions keep their panel, arrow navigation, and menus working even when the plugin manager removes the old version's cache. No session restart is needed. Windows backend upgrades apply on the next normal launch; display preferences update live on both platforms.
 
 ## Select agents directly (v0.6)
 

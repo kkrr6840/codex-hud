@@ -19,6 +19,7 @@ import time
 
 from .display import paint, init_colors, render_rows, clip
 from .sources import Collector, atomic_json, read_json
+from . import __version__
 
 ROOT = Path(__file__).resolve().parent.parent
 ENTRY = ROOT / "codex-hud"
@@ -29,8 +30,31 @@ def tmux(socket, *args, check=True):
                           capture_output=True, text=True, timeout=5)
 
 
-def command(*args):
-    return shlex.join([sys.executable, str(ENTRY), *map(str, args)])
+def runtime_entry(runtime):
+    """Keep this session's observer and key helpers outside disposable caches."""
+    runtime = Path(runtime)
+    target = runtime / ("code-" + __version__)
+    if not (target / "codex-hud").is_file():
+        staging = Path(tempfile.mkdtemp(prefix=".code-", dir=runtime))
+        try:
+            package = staging / "codex_hud"
+            package.mkdir()
+            for source in (ROOT / "codex_hud").glob("*.py"):
+                shutil.copy2(source, package / source.name)
+            shutil.copy2(ENTRY, staging / "codex-hud")
+            try:
+                staging.rename(target)
+            except OSError:
+                if not (target / "codex-hud").is_file():
+                    raise
+        finally:
+            shutil.rmtree(staging, ignore_errors=True)
+    return target / "codex-hud"
+
+
+def command(*args, runtime=None):
+    entry = runtime_entry(runtime) if runtime is not None else ENTRY
+    return shlex.join([sys.executable, str(entry), *map(str, args)])
 
 
 def configure_terminal(spec):
@@ -46,10 +70,10 @@ def configure_terminal(spec):
 
 
 def bind_agents(spec):
-    popup = ("display-popup", "-E", "-w", "90%", "-h", "85%", command("_agents", spec["runtime"]))
+    popup = ("display-popup", "-E", "-w", "90%", "-h", "85%", command("_agents", spec["runtime"], runtime=spec["runtime"]))
     tmux(spec["socket"], "bind-key", "Down", *popup)
     tmux(spec["socket"], "bind-key", "-n", "M-Down", *popup)
-    tmux(spec["socket"], "bind-key", "-n", "Down", "run-shell", command("_down", spec["runtime"], "#{pane_id}"))
+    tmux(spec["socket"], "bind-key", "-n", "Down", "run-shell", command("_down", spec["runtime"], "#{pane_id}", runtime=spec["runtime"]))
     active = "#{&&:#{==:#{@hud-nav},1},#{||:#{==:#{pane_id}," + spec["hud"] + "},#{&&:#{==:#{pane_id}," + spec["top"] + "},#{==:#{pane_active},0}}}}"
     for key in ("Up", "Enter", "Escape"):
         tmux(spec["socket"], "bind-key", "-n", key, "if-shell", "-F", active,
@@ -100,7 +124,7 @@ def launch(argv):
     try:
         created = tmux(socket, "-f", "/dev/null", "new-session", "-d", "-s", "codex",
                        "-x", options.width, "-y", options.height, "-c", os.getcwd(),
-                       "-P", "-F", "#{pane_id}", command("_run", runtime))
+                       "-P", "-F", "#{pane_id}", command("_run", runtime, runtime=runtime))
         spec["top"] = created.stdout.strip()
         configure_terminal(spec)
         tmux(socket, "set-option", "-g", "status", "off")
@@ -113,14 +137,14 @@ def launch(argv):
         tmux(socket, "set-option", "-g", "pane-active-border-style", "fg=colour238")
         # Start the observer off-screen. It joins the CLI only when it has data.
         split = tmux(socket, "new-window", "-d", "-t", "codex", "-n", "_hud",
-                     "-c", os.getcwd(), "-P", "-F", "#{pane_id}", command("_panel", runtime))
+                     "-c", os.getcwd(), "-P", "-F", "#{pane_id}", command("_panel", runtime, runtime=runtime))
         spec["hud"] = split.stdout.strip()
         atomic_json(runtime / "spec.json", spec)
-        tmux(socket, "bind-key", "H", "run-shell", command("_toggle", runtime))
-        tmux(socket, "bind-key", "C", "display-popup", "-E", "-w", "85%", "-h", "85%", command("config", "--menu"))
+        tmux(socket, "bind-key", "H", "run-shell", command("_toggle", runtime, runtime=runtime))
+        tmux(socket, "bind-key", "C", "display-popup", "-E", "-w", "85%", "-h", "85%", command("config", "--menu", runtime=runtime))
         bind_agents(spec)
         tmux(socket, "select-pane", "-t", spec["top"])
-        watcher = subprocess.Popen([sys.executable, str(ENTRY), "_watch", str(runtime)],
+        watcher = subprocess.Popen([sys.executable, str(runtime_entry(runtime)), "_watch", str(runtime)],
                                    stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                                    stderr=subprocess.DEVNULL, start_new_session=True)
         atomic_json(runtime / "ready.json", {"ready": True})
@@ -307,7 +331,7 @@ def panel(runtime):
                     tmux(spec["socket"], "select-pane", "-t", spec["top"])
                 elif key in (10, 13, curses.KEY_ENTER):
                     subprocess.Popen(["tmux", "-L", spec["socket"], "display-popup", "-E", "-w", "90%", "-h", "85%",
-                                      command("_agents", runtime, "--focus", json.dumps(selected), "--root", nav["root"], "--detail")],
+                                      command("_agents", runtime, "--focus", json.dumps(selected), "--root", nav["root"], "--detail", runtime=runtime)],
                                      stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                 else:
                     index = max(0, min(len(choices)-1, choices.index(selected)+(1 if key == curses.KEY_DOWN else -1)))
@@ -323,7 +347,7 @@ def panel(runtime):
                 else:
                     tmux(spec["socket"], "send-keys", "-t", spec["top"], "-l", raw_key)
             elif key == curses.KEY_DOWN and not expanded and snapshot and (snapshot["agents"] or snapshot["offload"]["jobs"]):
-                subprocess.Popen(["tmux", "-L", spec["socket"], "display-popup", "-E", "-w", "90%", "-h", "85%", command("_agents", runtime)],
+                subprocess.Popen(["tmux", "-L", spec["socket"], "display-popup", "-E", "-w", "90%", "-h", "85%", command("_agents", runtime, runtime=runtime)],
                                  stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             elif key in (curses.KEY_DOWN, ord("j")):
                 scroll += 1
@@ -481,9 +505,9 @@ def refresh_panels(argv):
         socket = spec["socket"]
         before = tmux(socket, "display-message", "-p", "-t", spec["top"], "#{pane_pid}").stdout.strip()
         configure_terminal(spec)
-        tmux(socket, "respawn-pane", "-k", "-t", spec["hud"], command("_panel", runtime))
-        tmux(socket, "bind-key", "H", "run-shell", command("_toggle", runtime))
-        tmux(socket, "bind-key", "C", "display-popup", "-E", "-w", "85%", "-h", "85%", command("config", "--menu"))
+        tmux(socket, "respawn-pane", "-k", "-t", spec["hud"], command("_panel", runtime, runtime=runtime))
+        tmux(socket, "bind-key", "H", "run-shell", command("_toggle", runtime, runtime=runtime))
+        tmux(socket, "bind-key", "C", "display-popup", "-E", "-w", "85%", "-h", "85%", command("config", "--menu", runtime=runtime))
         bind_agents(spec)
         after = tmux(socket, "display-message", "-p", "-t", spec["top"], "#{pane_pid}").stdout.strip()
         if before != after:

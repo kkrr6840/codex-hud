@@ -110,7 +110,7 @@ v0.6.1 起，已完成的子 agent 和分流任务自动从底部列表移除，
 
 选择器只读取日志和已返回的分流结果，不重新启动或恢复子会话，因此不会额外抢占会话写入权。原生输出读取日志尾部最多 128 KB 中最近五段 assistant 记录；继承的、早于子会话创建时间的父会话记录会排除。未保存 worker 日志的分流任务可显示其实际返回的结果；超出读取范围、加密内容和尚未产生的输出会明确提示。未知用量保持未知。Codex 的原生 **`/subagents`** 也可切换到子 agent 的完整会话界面，并继续它的工作。
 
-Mac 插件升级后，可让 hud skill 执行 `codex-hud refresh --session <当前会话 ID>`，只替换观察面板，保持 CLI 进程和对话继续；Windows 后端的代码升级在下次正常启动生效，两端显示配置都支持实时更新。Mac 的 `codex-hud watch --session <ID>` 可在独立终端只读监视指定会话；Windows 可用 `watch --session <ID> --once` 核对数据。
+Mac 插件升级后，可让 hud skill 执行 `codex-hud refresh --session <当前会话 ID>`，只替换观察面板，保持 CLI 进程和对话继续。v0.6.3 起，已打开会话的面板、方向键和菜单不依赖旧插件缓存目录；升级移除旧版本后仍可使用，无需重新进入。Windows 后端的代码升级在下次正常启动生效，两端显示配置都支持实时更新。Mac 的 `codex-hud watch --session <ID>` 可在独立终端只读监视指定会话；Windows 可用 `watch --session <ID> --once` 核对数据。
 
 ## 与 Claude HUD 的功能对照
 

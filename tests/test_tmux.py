@@ -61,6 +61,7 @@ f.close()
                         CODEX_HUD_SHELL_RC=str(self.base / "test.zshrc"))
         self.instances = []
         self.pty_children = []
+        self.entry = ENTRY
 
     def tearDown(self):
         for spec in self.instances:
@@ -185,16 +186,24 @@ f.close()
     def test_plain_down_selects_inline_agent_and_esc_returns_without_losing_draft(self):
         self.assert_auto_launch(inspect_agents=True, direct_agents=True)
 
-    def assert_auto_launch(self, cached=False, terminal="xterm-256color", inspect_agents=False, direct_agents=False):
+    @unittest.skipUnless(sys.platform == "darwin", "macOS BSD script PTY test")
+    def test_plugin_cache_removal_keeps_arrow_navigation_and_live_details(self):
+        cached = self.base / "cached-plugin"
+        shutil.copytree(ENTRY.parent / "codex_hud", cached / "codex_hud", ignore=shutil.ignore_patterns("__pycache__"))
+        shutil.copy2(ENTRY, cached / "codex-hud")
+        self.entry = cached / "codex-hud"
+        self.assert_auto_launch(inspect_agents=True, direct_agents=True, remove_plugin=True)
+
+    def assert_auto_launch(self, cached=False, terminal="xterm-256color", inspect_agents=False, direct_agents=False, remove_plugin=False):
         Path(self.env["CODEX_HUD_SHELL_RC"]).write_text('codex() { HTTP_PROXY="http://fixture.invalid" command codex "$@"; }\n')
         if not cached:
-            result = subprocess.run([sys.executable, str(ENTRY), "setup", "--enable"],
+            result = subprocess.run([sys.executable, str(self.entry), "setup", "--enable"],
                                     env=self.env, capture_output=True, text=True, timeout=5)
             self.assertEqual(result.returncode, 0, result.stderr)
         runtimes = self.base / "runtimes"
         runtimes.mkdir()
         env = dict(self.env, CODEX_HUD_RUNTIME_DIR=str(runtimes), TERM=terminal,
-                   HUD_TEST_PYTHON=sys.executable, HUD_TEST_ENTRY=str(ENTRY))
+                   HUD_TEST_PYTHON=sys.executable, HUD_TEST_ENTRY=str(self.entry))
         if direct_agents:
             env["HUD_TEST_COMPOSER"] = "1"
         # BSD script owns the PTY lifecycle. Avoid Python pty.fork on macOS,
@@ -251,6 +260,8 @@ f.close()
             def active(pane):
                 return self.tmux(spec, "display-message", "-p", "-t", pane, "#{pane_active}").stdout.strip() == "1"
             navigation = Path(spec["runtime"])/"navigation.json"
+            if remove_plugin:
+                shutil.rmtree(self.entry.parent)
             if direct_agents:
                 proc.stdin.write(b"\x1b[B"); proc.stdin.flush()
                 self.wait_for(lambda: active(spec["hud"]) and navigation.exists())
