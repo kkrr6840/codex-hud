@@ -582,24 +582,37 @@ class FakeCodex {
             self.assertTrue((Path(settings["native_node"]) / "node_modules/@lydell/node-pty/package.json").is_file())
             self.assertEqual((self.base / "settings/shell-rc.before").read_bytes(), original)
             runner = self.base / "bare codex smoke.ps1"
+            discovery = self.base / "command-discovery.json"
             literal = lambda value: "'" + str(value).replace("'", "''") + "'"
             runner.write_text(
                 "$ErrorActionPreference = 'Stop'\n"
                 f". {literal(profile)}\n"
                 "$resolved = Get-Command codex\n"
-                f"if ($resolved.CommandType -ne 'Application' -or $resolved.Path -ne {literal(self.wrapper)}) "
-                "{ throw \"Bare codex selected $($resolved.Path) instead of the HUD shim\" }\n"
-                "$allPaths = @(Get-Command codex -All | ForEach-Object { $_.Path })\n"
-                f"if ($allPaths -notcontains {literal(npm_cmd)} -or $allPaths -notcontains {literal(npm_ps1)}) "
-                "{ throw 'Original npm .cmd/.ps1 must coexist in PATH for this smoke' }\n"
+                "$commands = @(Get-Command codex -All | ForEach-Object { "
+                "@{ path = $_.Path; type = $_.CommandType.ToString() } })\n"
+                "$record = @{ selected = $resolved.Path; type = $resolved.CommandType.ToString(); commands = $commands }\n"
+                f"[IO.File]::WriteAllText({literal(discovery)}, ($record | ConvertTo-Json -Depth 4), "
+                "(New-Object Text.UTF8Encoding($false)))\n"
                 "codex --version\nexit $LASTEXITCODE\n", encoding="utf-8-sig")
             powershells = [shutil.which("pwsh.exe") or shutil.which("pwsh"),
                           shutil.which("powershell.exe")]
             self.assertIsNotNone(powershells[0], "CI requires PowerShell 7")
             for powershell in dict.fromkeys(path for path in powershells if path):
                 with self.subTest(powershell=powershell):
+                    discovery.unlink(missing_ok=True)
                     result = subprocess.run([powershell, "-NoLogo", "-NoProfile", "-File", str(runner)],
                                             env=dict(env, HTTP_PROXY="before-profile"), capture_output=True, encoding="utf-8", timeout=30)
+                    self.assertTrue(discovery.is_file(), result.stderr)
+                    found = json.loads(discovery.read_text(encoding="utf-8-sig"))
+                    self.assertEqual(found["type"], "Application", found)
+                    # ExternalScript paths may expand RUNNER~1 to runneradmin,
+                    # while Application paths retain the short spelling. File
+                    # identity preserves the assertion across either form.
+                    self.assertTrue(os.path.samefile(found["selected"], self.wrapper), found)
+                    candidates = [item["path"] for item in found["commands"] if item.get("path")]
+                    for original in (npm_cmd, npm_ps1):
+                        self.assertTrue(any(os.path.samefile(candidate, original) for candidate in candidates),
+                                        f"Original npm entry was not discovered: {original}; commands={found}")
                     self.assert_forwarded(result, ["--version"])
             with redirect_stdout(io.StringIO()):
                 self.assertEqual(setup.configure(["--uninstall"]), 0)

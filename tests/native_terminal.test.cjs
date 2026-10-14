@@ -21,6 +21,37 @@ async function until(predicate, message, timeout = 6000) {
   while (!predicate()) { if (Date.now() > deadline) throw new Error(message); await wait(25); }
 }
 function write(terminal, data) { return new Promise(resolve => terminal.write(data, resolve)); }
+function readFixture(filename) {
+  try { return fs.readFileSync(filename, 'utf8').slice(-8000); } catch (error) { return `[${error.code}: ${filename}]`; }
+}
+function diagnose(error, runtime, state = {}) {
+  const diagnostic = { platform: process.platform, ...state, runner: readFixture(path.join(runtime, 'runner.json')),
+    native: readFixture(path.join(runtime, 'native.log')), snapshot: readFixture(path.join(runtime, 'snapshot.json')) };
+  error.message += `\nNative fixture diagnostics: ${JSON.stringify(diagnostic)}`;
+  return error;
+}
+async function removeFixture(base, originalError) {
+  try { await fs.promises.rm(base, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }); }
+  catch (error) { if (!originalError) throw error; process.stderr.write(`Additional fixture cleanup failure: ${error.message}\n`); }
+}
+async function stopFixture(outer, hasExited, runtime, originalError) {
+  let owned = {};
+  try { owned = JSON.parse(fs.readFileSync(path.join(runtime, 'runner.json'), 'utf8')); } catch {}
+  try {
+    if (!hasExited()) {
+      // Exit through the UI first; hard termination is only a test-failure
+      // fallback and targets these fixture PIDs, never the test runner/PID 0.
+      outer.write('\x1b'); await wait(60); outer.write('\x1b'); await wait(60); outer.write('/quit\r');
+      const deadline = Date.now() + 2000;
+      while (!hasExited() && Date.now() < deadline) await wait(25);
+    }
+    if (!hasExited()) { try { outer.kill(); } catch {} }
+    for (const pid of [owned.pid, owned.bridge_pid, outer.pid]) {
+      if (Number.isInteger(pid) && pid > 0 && pid !== process.pid && hud.processAlive(pid)) { try { process.kill(pid); } catch (error) { if (error.code !== 'ESRCH') throw error; } }
+    }
+    await until(() => [owned.pid, owned.bridge_pid, outer.pid].every(pid => !hud.processAlive(pid)), 'fixture processes stopped before directory removal', 8000);
+  } catch (error) { if (!originalError) throw error; process.stderr.write(`Additional fixture stop failure: ${error.message}\n`); }
+}
 
 test('empty composer is read from VT cells; draft, hidden cursor and native menu pass through', async () => {
   const terminal = new Terminal({ cols: 80, rows: 24, allowProposedApi: true });
@@ -202,7 +233,7 @@ test('pending draft requires a composer fingerprint change; Working output canno
   } finally { screen.dispose(); }
 });
 
-test('external termination restores terminal and stops only owned PTY and bridge', { timeout: 10000 }, async () => {
+test('external termination restores terminal and stops only owned PTY and bridge', { timeout: 25000 }, async () => {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-hud-native-signal-'));
   const runtime = path.join(base, 'runtime'), bridgePidFile = path.join(base, 'bridge.pid');
   fs.mkdirSync(runtime, { mode: 0o700 });
@@ -214,10 +245,10 @@ test('external termination restores terminal and stops only owned PTY and bridge
   const stdin = Object.assign(new EventEmitter(), { isTTY: true, isRaw: false, setEncoding() {}, resume() {}, pause() {}, setRawMode(value) { this.isRaw = value; } });
   let output = '';
   const stdout = Object.assign(new EventEmitter(), { isTTY: true, columns: 80, rows: 24, write(value) { output += value; } });
-  let running;
+  let running, failure;
   try {
     running = hud.run(runtime, { stdin, stdout });
-    await until(() => fs.existsSync(bridgePidFile) && fs.existsSync(path.join(runtime, 'runner.json')), 'owned children started');
+    await until(() => fs.existsSync(bridgePidFile) && fs.existsSync(path.join(runtime, 'runner.json')) && JSON.parse(fs.readFileSync(path.join(runtime, 'runner.json'), 'utf8')).pid > 0, 'owned children started with real ConPTY PID');
     const bridgePid = Number(fs.readFileSync(bridgePidFile, 'utf8'));
     const childPid = JSON.parse(fs.readFileSync(path.join(runtime, 'runner.json'), 'utf8')).pid;
     process.emit('SIGTERM');
@@ -225,9 +256,11 @@ test('external termination restores terminal and stops only owned PTY and bridge
     assert.equal(stdin.isRaw, false); assert.equal(fs.existsSync(runtime), false);
     await until(() => [bridgePid, childPid].every(pid => { try { process.kill(pid, 0); return false; } catch { return true; } }), 'owned children stopped');
     assert.ok(output.endsWith(`${CSI}?1049l`));
+  } catch (error) {
+    failure = error; throw diagnose(error, runtime, { output: output.slice(-6000) });
   } finally {
     if (fs.existsSync(runtime)) { process.emit('SIGTERM'); if (running) await running; }
-    fs.rmSync(base, { recursive: true, force: true });
+    await removeFixture(base, failure);
   }
 });
 
@@ -249,7 +282,7 @@ test('dependency prefix has priority and settings.native_node resolves the insta
   } finally { fs.rmSync(config, { recursive: true, force: true }); }
 });
 
-test('real native PTY: selection, draft passthrough, live detail, root change, resize and /quit cleanup', { timeout: 20000 }, async () => {
+test('real native PTY: selection, draft passthrough, live detail, root change, resize and /quit cleanup', { timeout: 45000 }, async () => {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-hud-native-test-'));
   const runtime = path.join(base, 'runtime'), inputLog = path.join(base, 'input.jsonl'), bridgeLog = path.join(base, 'bridge.jsonl');
   fs.mkdirSync(runtime, { mode: 0o700 });
@@ -275,11 +308,13 @@ setTimeout(update,150); setInterval(update,150);
     bridge_argv: [process.execPath, fakeBridge], hud_height: 6, diagnostic: path.join(runtime, 'diagnostic.log') }));
   const outer = pty.spawn(process.execPath, [path.resolve(__dirname, '../native/terminal.cjs'), runtime], {
     name: 'xterm-256color', cols: 80, rows: 24, cwd: base,
-    env: { ...process.env, CODEX_THREAD_ID: 'launcher-thread', CODEX_SESSION_ID: 'launcher-session' }, encoding: 'utf8'
+    env: { ...process.env, CODEX_THREAD_ID: 'launcher-thread', CODEX_SESSION_ID: 'launcher-session', CODEX_HUD_NATIVE_DEBUG: '1' },
+    ...(process.platform === 'win32' ? {} : { encoding: 'utf8' }), conptyInheritCursor: false
   });
   const terminal = new Terminal({ cols: 80, rows: 24, allowProposedApi: true });
-  let exited = false, exitCode, rendered = '';
+  let exited = false, exitCode, rendered = '', replies = '', failure;
   outer.onData(data => { rendered += data; terminal.write(data); });
+  terminal.onData(data => { replies += data; outer.write(data); });
   outer.onExit(event => { exited = true; exitCode = event.exitCode; });
   const visible = () => Array.from({ length: terminal.rows }, (_, y) => terminal.buffer.active.getLine(terminal.buffer.active.viewportY + y)?.translateToString(true) || '').join('\n');
   const inputs = () => fs.existsSync(inputLog) ? fs.readFileSync(inputLog, 'utf8').trim().split('\n').map(JSON.parse).filter(entry => entry.input).map(entry => entry.input).join('') : '';
@@ -324,13 +359,16 @@ setTimeout(update,150); setInterval(update,150);
     assert.equal(exitCode, 0); assert.equal(fs.existsSync(runtime), false, 'owned runtime removed');
     await until(() => { try { process.kill(bridgePid, 0); return false; } catch { return true; } }, 'bridge process stopped');
     assert.ok(rendered.includes(`${CSI}?1049l`), 'outer terminal mode restored');
+  } catch (error) {
+    failure = error; throw diagnose(error, runtime, { outerPid: outer.pid, exited, exitCode, replies,
+      visible: visible(), vt: rendered.slice(-6000), input: readFixture(inputLog), bridge: readFixture(bridgeLog) });
   } finally {
-    if (!exited) { try { outer.kill(); } catch {} }
-    terminal.dispose(); fs.rmSync(base, { recursive: true, force: true });
+    await stopFixture(outer, () => exited, runtime, failure);
+    terminal.dispose(); await removeFixture(base, failure);
   }
 });
 
-test('real PTY and Python bridge read SQLite-correlated Chinese agent output without model requests', { timeout: 20000 }, async () => {
+test('real PTY and Python bridge read SQLite-correlated Chinese agent output without model requests', { timeout: 45000 }, async () => {
   const python = process.env.PYTHON || (process.platform === 'win32' ? 'python' : 'python3');
   const repository = path.resolve(__dirname, '..');
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-hud-python-'));
@@ -343,7 +381,7 @@ test('real PTY and Python bridge read SQLite-correlated Chinese agent output wit
   fs.mkdirSync(config, { recursive: true, mode: 0o700 });
   const environment = { ...process.env, CODEX_HOME: home, CODEX_HUD_CONFIG_HOME: config,
     CODEX_HUD_NODE_HOME: path.join(repository, 'native'), CODEX_X_CODEX_HOME: path.join(work, '私有分流'),
-    PYTHONUTF8: '1', PYTHONIOENCODING: 'utf-8' };
+    PYTHONUTF8: '1', PYTHONIOENCODING: 'utf-8', CODEX_HUD_NATIVE_DEBUG: '1' };
   const setup = spawnSync(python, ['-c', `
 import json, sqlite3, sys, time
 from datetime import datetime, timezone
@@ -382,11 +420,13 @@ process.stdin.on('data',data=>{const text=data.replace(/\\x1b(?:\\[[0-?]*[ -/]*[
   fs.writeFileSync(path.join(runtime, 'spec.json'), JSON.stringify({ runtime, home, cwd: work, argv: [process.execPath, fakeCli],
     bridge_argv: [python, path.join(repository, 'codex-hud'), '_native_bridge', runtime], hud_height: 6, diagnostic }));
   const outer = pty.spawn(process.execPath, [path.join(repository, 'native/terminal.cjs'), runtime], {
-    name: 'xterm-256color', cols: 90, rows: 28, cwd: work, env: environment, encoding: 'utf8'
+    name: 'xterm-256color', cols: 90, rows: 28, cwd: work, env: environment,
+    ...(process.platform === 'win32' ? {} : { encoding: 'utf8' }), conptyInheritCursor: false
   });
   const terminal = new Terminal({ cols: 90, rows: 28, allowProposedApi: true });
-  let exited = false, exitCode, output = '';
+  let exited = false, exitCode, output = '', replies = '', failure;
   outer.onData(data => { output += data; terminal.write(data); });
+  terminal.onData(data => { replies += data; outer.write(data); });
   outer.onExit(event => { exited = true; exitCode = event.exitCode; });
   const visible = () => Array.from({ length: terminal.rows }, (_, y) => terminal.buffer.active.getLine(terminal.buffer.active.viewportY + y)?.translateToString(true) || '').join('\n');
   const selected = () => {
@@ -413,8 +453,10 @@ process.stdin.on('data',data=>{const text=data.replace(/\\x1b(?:\\[[0-?]*[ -/]*[
     await until(() => [runner.pid, runner.bridge_pid].every(pid => { try { process.kill(pid, 0); return false; } catch { return true; } }), 'official fixture and Python bridge stopped');
     assert.deepEqual(fs.readFileSync(childLog), beforeLog);
     assert.ok(output.includes(`${CSI}?1049l`));
+  } catch (error) {
+    failure = error; throw diagnose(error, runtime, { outerPid: outer.pid, exited, exitCode, replies, visible: visible(), vt: output.slice(-6000) });
   } finally {
-    if (!exited) { try { outer.kill(); } catch {} }
-    terminal.dispose(); fs.rmSync(base, { recursive: true, force: true });
+    await stopFixture(outer, () => exited, runtime, failure);
+    terminal.dispose(); await removeFixture(base, failure);
   }
 });

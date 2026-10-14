@@ -431,6 +431,19 @@ function atomicJson(filename, value) {
   fs.renameSync(temporary, filename);
 }
 
+function processAlive(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try { process.kill(pid, 0); return true; } catch (error) { if (error.code === 'ESRCH') return false; if (error.code === 'EPERM') return true; throw error; }
+}
+
+async function waitForOwnedExit(child, bridge, hasExited, timeout = 7000) {
+  const deadline = Date.now() + timeout;
+  while ((!hasExited() && (!child?.pid || processAlive(child.pid))) || (bridge?.pid && processAlive(bridge.pid))) {
+    if (Date.now() >= deadline) throw new Error(`Owned children did not stop: CLI ${child?.pid ?? 'pending'}, bridge ${bridge?.pid ?? 'none'}`);
+    await new Promise(resolve => setTimeout(resolve, 25));
+  }
+}
+
 async function run(runtime, options = {}) {
   runtime = path.resolve(runtime);
   const spec = JSON.parse(fs.readFileSync(path.join(runtime, 'spec.json'), 'utf8'));
@@ -443,13 +456,15 @@ async function run(runtime, options = {}) {
   if (!stdin.isTTY || !stdout.isTTY) throw new Error('Codex HUD native terminal requires an interactive terminal');
   const { pty, Terminal } = options.dependencies || loadDependencies();
   let cols = Math.max(2, stdout.columns || 80), rows = Math.max(2, stdout.rows || 24);
-  let child, bridge, screen, composer, childData, childExit, bridgeInput, renderTimer, escapeTimer, prefixTimer, closed = false, childExited = false;
+  let child, bridge, screen, composer, childData, childExit, bridgeInput, renderTimer, escapeTimer, prefixTimer, pidTimer, closed = false, childExited = false;
+  let cleanupPromise;
   const rawBefore = Boolean(stdin.isRaw);
   const renderer = new DiffRenderer(data => stdout.write(data));
   const decoder = new InputDecoder();
   const log = message => {
     try { fs.appendFileSync(path.join(runtime, 'native.log'), safeText(message) + '\n', { mode: 0o600 }); } catch {}
   };
+  const debug = message => { if (process.env.CODEX_HUD_NATIVE_DEBUG === '1') log(`${new Date().toISOString()} ${message}`); };
   const send = packet => { if (bridge?.stdin.writable && !bridge.stdin.destroyed) bridge.stdin.write(JSON.stringify(packet) + '\n'); };
   const controller = new HudController(send);
   const desiredMainRows = () => Math.max(1, rows - controller.height(rows, spec.hud_height));
@@ -483,7 +498,7 @@ async function run(runtime, options = {}) {
   const scheduleRender = () => { if (!closed && !renderTimer) renderTimer = setTimeout(render, 8); };
   const finished = new Promise(resolve => {
     const cleanup = code => {
-      if (closed) return;
+      if (closed) return cleanupPromise;
       closed = true;
       clearTimeout(renderTimer); clearTimeout(escapeTimer); clearTimeout(prefixTimer);
       stdin.removeListener('data', onInput); stdout.removeListener('resize', onResize);
@@ -491,14 +506,32 @@ async function run(runtime, options = {}) {
       if (stdin.setRawMode) { try { stdin.setRawMode(rawBefore); } catch {} }
       for (const [name, handler] of Object.entries(signals)) process.removeListener(name, handler);
       stdout.write(`${CSI}0m${CSI}?2004l${CSI}?1004l${CSI}?9l${CSI}?1000l${CSI}?1002l${CSI}?1003l${CSI}?1006l${CSI}?25h${CSI}?7h${CSI}?1049l`);
-      if (child && !childExited) { try { child.kill(); } catch {} }
-      if (bridge && bridge.exitCode === null) bridge.kill();
-      childData?.dispose(); childExit?.dispose(); bridgeInput?.close();
-      screen?.dispose();
-      // The validated per-launch directory is ours. Never delete a parent or
-      // another launch's runtime, and never find/kill processes by name.
-      try { fs.rmSync(runtime, { recursive: true, force: true }); } catch (error) { log(error.message); }
-      resolve(code);
+      debug(`cleanup code=${code} cli_pid=${child?.pid} bridge_pid=${bridge?.pid}`);
+      if (child && !childExited) {
+        try { child.kill(); } catch (error) { log(error.message); }
+        // Windows node-pty closes ConPTY and kills its console list
+        // asynchronously. Terminate only our verified direct child promptly.
+        if (process.platform === 'win32' && Number.isInteger(child.pid) && child.pid > 0) {
+          try { process.kill(child.pid); } catch (error) { if (error.code !== 'ESRCH') log(error.message); }
+        }
+      }
+      if (bridge?.pid && bridge.exitCode === null) { try { bridge.kill(); } catch (error) { log(error.message); } }
+      cleanupPromise = (async () => {
+        try {
+          // Keep PTY output drained and the exit listener alive while ConPTY
+          // closes; removing them early can leave console processes behind.
+          if (child) await waitForOwnedExit(child, bridge, () => childExited);
+          debug('owned children stopped');
+        } catch (error) { log(error.message); code = 1; (options.stderr || process.stderr).write(`Codex HUD: ${error.message}\n`); }
+        clearInterval(pidTimer);
+        childData?.dispose(); childExit?.dispose(); bridgeInput?.close(); screen?.dispose();
+        // A Windows cwd/console handle may be released shortly after exit.
+        // Retry asynchronously, so socket/process exit events can still run.
+        try { await fs.promises.rm(runtime, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }); }
+        catch (error) { code = 1; (options.stderr || process.stderr).write(`Codex HUD cleanup: ${error.message}\n`); }
+        resolve(code);
+      })();
+      return cleanupPromise;
     };
     const signals = { SIGINT: () => cleanup(130), SIGTERM: () => cleanup(143), SIGHUP: () => cleanup(129),
       ...(process.platform === 'win32' ? { SIGBREAK: () => cleanup(130) } : {}) };
@@ -510,7 +543,7 @@ async function run(runtime, options = {}) {
         // edit. Do not select HUD from the stale empty-composer screen.
         const result = controller.input(token, composer.empty());
         if (hadPrefix) clearTimeout(prefixTimer);
-        if (controller.prefix) prefixTimer = setTimeout(() => { controller.prefix = false; forward('\x02'); }, 500);
+        if (controller.prefix) prefixTimer = setTimeout(() => { controller.prefix = false; forward('\x02'); }, 2000);
         if (!result.consumed) forward((result.prepend || '') + token.raw, token);
       }
       scheduleRender();
@@ -525,15 +558,32 @@ async function run(runtime, options = {}) {
       send({ type: 'size', cols, rows }); renderer.invalidate(); scheduleRender();
     };
     try {
+      debug(`startup cols=${cols} rows=${rows} cwd=${spec.cwd}`);
       screen = new VirtualScreen(Terminal, cols, mainRows, scheduleRender, data => { if (child && !childExited) child.write(data); });
       composer = new ComposerGuard(screen);
       child = pty.spawn(spec.argv[0], spec.argv.slice(1), { name: 'xterm-256color', cols, rows: mainRows,
-        cwd: spec.cwd, env: childEnvironment(runtime), encoding: 'utf8', conptyInheritCursor: false });
-      const runner = { pid: child.pid, started: Date.now() / 1000 };
+        cwd: spec.cwd, env: childEnvironment(runtime), ...(process.platform === 'win32' ? {} : { encoding: 'utf8' }), conptyInheritCursor: false });
+      const runner = { pid: child.pid > 0 ? child.pid : null, started: Date.now() / 1000 };
       atomicJson(path.join(runtime, 'runner.json'), runner);
+      // ConPTY's public pid is initially 0, then becomes the real CLI pid
+      // after its asynchronous pipe connection. Never publish PID 0.
+      const publishPid = () => {
+        if (child.pid > 0 && runner.pid !== child.pid) {
+          runner.pid = child.pid;
+          try { atomicJson(path.join(runtime, 'runner.json'), runner); debug(`cli ready pid=${runner.pid}`); } catch (error) { if (!closed) log(error.message); }
+        }
+        if (runner.pid) clearInterval(pidTimer);
+      };
+      pidTimer = setInterval(publishPid, 25);
+      childData = child.onData(data => {
+        publishPid(); debug(`cli data bytes=${data.length}`);
+        if (!closed) screen.write(data, () => { composer.observe(); debug(`cli parsed cursor=${screen.terminal.buffer.active.cursorX},${screen.terminal.buffer.active.cursorY} empty=${screen.emptyComposer()} sync=${screen.terminal.modes.synchronizedOutputMode}`); });
+      });
+      childExit = child.onExit(event => { childExited = true; debug(`cli exit code=${event.exitCode}`); cleanup(event.exitCode || 0); });
       bridge = spawn(spec.bridge_argv[0], spec.bridge_argv.slice(1), { cwd: spec.cwd,
         env: { ...process.env, PYTHONUTF8: '1', PYTHONIOENCODING: 'utf-8' }, stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
-      atomicJson(path.join(runtime, 'runner.json'), { ...runner, bridge_pid: bridge.pid });
+      runner.bridge_pid = bridge.pid;
+      atomicJson(path.join(runtime, 'runner.json'), runner); debug(`bridge started pid=${bridge.pid}`);
       bridge.stdin.on('error', error => log(error.message));
       bridge.stderr.setEncoding('utf8'); bridge.stderr.on('data', log);
       bridge.on('error', error => { log(error.message); controller.update({ type: 'snapshot', snapshot: {}, rows: [] }); scheduleRender(); });
@@ -541,16 +591,18 @@ async function run(runtime, options = {}) {
       bridgeInput = readline.createInterface({ input: bridge.stdout });
       bridgeInput.on('line', line => {
         try {
+          if (closed) return;
           const previousRoot = controller.root;
-          controller.update(JSON.parse(line));
+          const packet = JSON.parse(line);
+          debug(`bridge packet type=${packet.type} rows=${packet.rows?.length}`);
+          controller.update(packet);
           if (controller.root !== previousRoot) composer.reset();
           scheduleRender();
         } catch (error) { log(`Bridge protocol: ${error.message}`); }
       });
-      childData = child.onData(data => screen.write(data, () => composer.observe()));
-      childExit = child.onExit(event => { childExited = true; cleanup(event.exitCode || 0); });
       for (const [name, handler] of Object.entries(signals)) process.on(name, handler);
       stdout.write(`${CSI}?1049h${CSI}?7l${CSI}2J`);
+      debug('outer VT initialized');
       stdin.setEncoding('utf8'); stdin.setRawMode(true); stdin.resume();
       stdin.on('data', onInput); stdout.on('resize', onResize);
       send({ type: 'size', cols, rows }); scheduleRender();
@@ -560,7 +612,7 @@ async function run(runtime, options = {}) {
 }
 
 module.exports = { loadDependencies, safeText, keyId, rootId, colorSgr, clip, wrapText, styledRow, terminalLine,
-  isEmptyComposer, composerFingerprint, ComposerGuard, VirtualScreen, InputDecoder, HudController, DiffRenderer, childEnvironment, run };
+  isEmptyComposer, composerFingerprint, ComposerGuard, VirtualScreen, InputDecoder, HudController, DiffRenderer, childEnvironment, processAlive, waitForOwnedExit, run };
 
 if (require.main === module) {
   if (!process.argv[2]) { process.stderr.write('Usage: node native/terminal.cjs <runtime>\n'); process.exitCode = 2; }

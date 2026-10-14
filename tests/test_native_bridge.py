@@ -101,7 +101,10 @@ class NativeBridgeTest(unittest.TestCase):
         self.assertTrue((self.runtime/"snapshot.json").is_file())
 
     def test_real_jsonl_process_refreshes_model_and_root_then_exits_on_eof(self):
-        self.proc = subprocess.Popen([sys.executable, str(ENTRY), "_native_bridge", str(self.runtime)],
+        # A stalled Windows pipe must provide a traceback rather than a silent
+        # timeout. Execute the same entry, with only a diagnostic watchdog added.
+        watchdog = "import faulthandler,runpy,sys; faulthandler.dump_traceback_later(4); sys.argv=sys.argv[1:]; runpy.run_path(sys.argv[0],run_name='__main__')"
+        self.proc = subprocess.Popen([sys.executable, "-c", watchdog, str(ENTRY), "_native_bridge", str(self.runtime)],
                                      stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                      text=True, encoding="utf-8", env={**os.environ, "PYTHONUTF8": "1"})
         incoming = queue.Queue()
