@@ -65,7 +65,7 @@ def read(pathname):
     try:
         if pathname.stat().st_size > 65536:
             return {}, "显示配置超过 64 KB"
-        value = json.loads(pathname.read_text())
+        value = json.loads(pathname.read_text(encoding="utf-8"))
         if not isinstance(value, dict):
             raise ValueError("顶层必须是 JSON 对象")
         return value, None
@@ -161,6 +161,8 @@ def configure(argv):
     parser.add_argument("--describe", action="store_true", help="显示项目、完整配置及数据源限制")
     args = parser.parse_args(argv)
     if args.menu:
+        if os.name == "nt":
+            parser.error("Windows 请在 HUD 中按 Ctrl-b 后 C 或 F8；完整设置可通过 hud skill 修改")
         from .menu import run
         return run()
     if args.describe:

@@ -1,0 +1,55 @@
+name: Native Windows HUD
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  native-windows:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    env:
+      PYTHONUTF8: "1"
+      CODEX_HOME: ${{ runner.temp }}/codex-hud-empty-home
+      CODEX_HUD_CONFIG_HOME: ${{ runner.temp }}/codex-hud-empty-settings
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: native/package-lock.json
+      - name: Install native ConPTY dependencies
+        shell: pwsh
+        run: npm ci --prefix native --include=optional --no-audit --no-fund
+      - name: Verify portable Python behavior and Windows installation
+        shell: pwsh
+        run: |
+          @'
+          from pathlib import Path
+          import sys
+          import unittest
+
+          patterns = (
+              "test_agents.py", "test_config.py", "test_display.py", "test_sources.py",
+              "test_native_bridge.py", "test_keys.py", "test_windows_setup.py",
+          )
+          suite = unittest.TestSuite()
+          for pattern in patterns:
+              if not (Path("tests") / pattern).is_file():
+                  raise SystemExit(f"Missing required Windows test file: {pattern}")
+              suite.addTests(unittest.defaultTestLoader.discover("tests", pattern=pattern))
+          result = unittest.TextTestRunner(verbosity=2).run(suite)
+          sys.exit(0 if result.wasSuccessful() else 1)
+          '@ | python -
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Verify real ConPTY terminal and JSONL bridge without model requests
+        shell: pwsh
+        run: node --test tests/native_terminal.test.cjs

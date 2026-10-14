@@ -7,6 +7,8 @@ description: Configure Codex HUD display items, quotas, layouts, colors and pres
 
 Use this plugin's deterministic setup command. The plugin root is two levels above this SKILL.md. Do not assume a developer's checkout path or change the official CLI binary.
 
+Commands below use `python3` on macOS/Linux. On native Windows use `python` (or `py -3`); Python 3.11+ and Node.js 20+ with npm are required. Setup installs the pinned ConPTY dependencies. Do not install tmux, curses, lsof or WSL for native Windows.
+
 ## Display configuration
 
 Run `python3 <plugin-root>/codex-hud config --describe` to inspect the effective preferences, valid display items, and unavailable data. For an explicit request, apply only the requested keys without asking for another confirmation. Preserve unrelated settings and manual overrides. Configuration is read every second; an active HUD does not need a new Codex session.
@@ -16,13 +18,15 @@ Run `python3 <plugin-root>/codex-hud config --describe` to inspect the effective
 - Layout/language: `config --layout compact --language zh-Hans` (also expanded, en, zh-Hant).
 - Advanced values: `config --set 'git.ahead_behind=true' --set 'reset_format="both"' --set 'height=8'`.
 - Other keys, colors, ordering, merge groups and thresholds are documented by `config --describe` and the README. Pass values as properly quoted JSON; never execute user text as a shell command.
-- The native terminal menu opens with **Ctrl-b C**: release Ctrl-b, then press uppercase C. Arrows select an item; Space toggles it; 1/2/3 select presets; L changes layout; G changes language; Esc closes it. Changes save immediately.
-- Inspect agents with **Alt+Down**, or release Ctrl-b and press Down. In a focused compact HUD pane, Down also opens the selector. Up/Down select a native agent or session-correlated relay job; Enter opens live task/status/usage/tool/output details. Esc returns to the list, then the main CLI; q closes immediately. This viewer only reads the current snapshot and identified session logs. It never resumes, interrupts or sends a message to an agent. Encrypted or missing output stays unavailable. For native thread switching or continuing a native agent, use Codex's `/subagents` command.
+- The terminal menu opens with **Ctrl-b C**: release Ctrl-b, then press uppercase C. On macOS, arrows select an item; Space toggles it; 1/2/3 select presets; L changes layout; G changes language. On Windows, arrows select a preset and Enter applies it; F8 also opens the menu. Esc closes it. Use this skill for all other Windows display changes.
+- Inspect agents by pressing **Down from the default empty composer**. It selects the first visible agent row inline in the HUD; Up/Down selects, Enter opens live task/status/usage/tool/output details, Esc returns to HUD and then main input. Up from the first row also returns to input. Drafts and native menus keep their official arrow behavior. Alternative: macOS **Option (⌥)+Down**, Windows **Alt+Down**, or Ctrl-b followed by Down on either platform. Alternatives open a list on macOS and select HUD rows on Windows. This viewer only reads the current snapshot and identified session logs. It never resumes, interrupts or sends a message to an agent. Encrypted or missing output stays unavailable. For native thread switching or continuing a native agent, use Codex's `/subagents` command.
 - If the user invokes general customization without specifying preferences, briefly list the current active items and ask which to change, or explain the menu. Do not arbitrarily overwrite a preset.
 
 Preferences live in `~/.config/codex-hud/display.json`. Optional `override.json` in the same directory wins; never modify it on a routine configuration request. The configuration command reports whether that file is present; explain any override that prevents the requested effective change. Unknown existing settings survive updates.
 
 After a plugin update, an active HUD may still run the old code. `python3 <plugin-root>/codex-hud refresh --session <current-thread-id>` replaces only its observer and bindings. Check the returned runtime and retained CLI PID; do not restart or stop the main conversation.
+
+That code-refresh command applies to macOS tmux HUDs. Native Windows backend upgrades take effect on the next normal launch. Display preferences refresh live on both platforms. Windows supports `watch --session <ID> --once` for read-only data verification, without a curses viewer.
 
 Quotas come from official current-thread rate-limit snapshots, not estimates from tokens. The 5-hour or weekly row stays hidden when its window is absent. Main-thread usage never adds native agent or relay usage. Relay failures without a returned usage record show unavailable, not zero. Cost totals, API tok/s, cache expiry, and active Skill executions lack reliable Codex telemetry; do not invent these values or read credentials to fill gaps.
 
@@ -36,8 +40,10 @@ Quotas come from official current-thread rate-limit snapshots, not estimates fro
 
 Setup creates a transparent `codex` launcher in the user's local bin directory and adds one marked PATH block to the appropriate shell rc. For an owned, writable symlink verified as the official npm package's `bin.codex`, setup also bridges that existing entry to the launcher, preserving its original link for uninstall. Official package files, existing shell functions, proxy settings, authentication and CLI configuration are preserved. A pre-existing unrelated launcher is never overwritten. Read the returned `entrypoint_bridge` and effect; do not claim installation succeeded from a manifest alone.
 
+On Windows, setup creates a `codex.cmd` shim and marked PATH blocks in available PowerShell profiles. Read its returned `profile` / `profiles` and `native_node` paths. A new PowerShell / Windows Terminal tab loads these once; ordinary subsequent `codex` launches need no commands. Windows npm entry files and execution policy are preserved. Non-interactive passthrough waits for the official executable and returns its exit code.
+
 After one-time setup, ordinary interactive `codex`, `codex resume` and `codex fork` automatically open with the fixed HUD. Non-interactive commands, redirected output, help/version queries and remote sessions use the original CLI. The CLI's approvals and network policy still apply. A bridged entry works even in old shells with cached paths: users do not need `rehash`. If a package update recreates its bin link, rerun setup to bridge the updated entry.
 
-When no compatible entry could be bridged, a new terminal tab loads the PATH integration. Do not ask the user to run a tmux attach command on every launch. An existing CLI outside tmux must be reentered to gain a pane; a bridged entry requires no extra shell command. For sessions already launched with HUD, `Ctrl-b H` expands details. Model and effort follow the current thread selection on each one-second refresh; global default configuration must not override an independently selected session model.
+When no compatible entry could be bridged, a new terminal tab loads the PATH integration. Do not ask the user to run a tmux attach command on every launch. An existing CLI outside the HUD backend must be reentered once; a bridged macOS entry requires no extra shell command. On macOS, `Ctrl-b H` expands details. Model and effort follow the current thread selection on each one-second refresh; global default configuration must not override an independently selected session model.
 
 Agent counts come from session relations and turn events. Unknown usage stays unknown. Encrypted task instructions are represented by their recorded task names. Do not read credentials or route HUD configuration through relay workers.

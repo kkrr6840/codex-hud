@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import shlex
 import shutil
+import subprocess
 import sys
 import tempfile
 import tomllib
@@ -65,6 +66,9 @@ def is_shim(path):
 
 
 def resolve_codex(preferred=None):
+    if os.name == "nt":
+        from .windows_setup import resolve_codex as windows_resolve
+        return windows_resolve(preferred)
     candidates = [preferred or os.environ.get("CODEX_HUD_REAL_CLI")]
     cfg = read_json(settings_dir() / "settings.json", {})
     if not isinstance(cfg, dict):
@@ -88,7 +92,7 @@ def resolve_codex(preferred=None):
 def plugin_key(home):
     path = Path(home) / "config.toml"
     if path.exists():
-        config = tomllib.loads(path.read_text())
+        config = tomllib.loads(path.read_text(encoding="utf-8"))
         for key in config.get("plugins", {}):
             if key.startswith("codex-hud@"):
                 return key
@@ -98,10 +102,14 @@ def plugin_key(home):
 def dispatch(argv, real_cli, settings):
     if not (sys.stdin.isatty() and sys.stdout.isatty()) or os.environ.get("CODEX_HUD_ACTIVE") or not interactive(argv):
         os.environ["CODEX_HUD_ROUTE_PID"] = str(os.getpid())
+        if os.name == "nt":
+            return subprocess.call([real_cli, *argv])
         os.execv(real_cli, [real_cli, *argv])
     from .cli import launch
     os.environ["CODEX_HUD_REAL_CLI"] = real_cli
     os.environ["CODEX_HUD_AUTOLAUNCH"] = "1"
+    if settings.get("native_node"):
+        os.environ["CODEX_HUD_NODE_HOME"] = settings["native_node"]
     height = settings.get("height", 11)
     if type(height) is not int or not 6 <= height <= 30:
         height = 11
@@ -196,6 +204,9 @@ def restore_entrypoint(current):
 
 
 def configure(argv):
+    if os.name == "nt":
+        from .windows_setup import configure as windows_configure
+        return windows_configure(argv)
     parser = argparse.ArgumentParser(prog="codex-hud setup", description="安装或配置一次自动 HUD；普通 codex 交互启动后自动显示")
     action = parser.add_mutually_exclusive_group()
     action.add_argument("--enable", action="store_true")

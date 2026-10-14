@@ -12,7 +12,7 @@ import tomllib
 
 def read_settings(path):
     try:
-        value = json.loads(Path(path).read_text())
+        value = json.loads(Path(path).read_text(encoding="utf-8"))
         return value if isinstance(value, dict) else {}
     except (OSError, ValueError):
         return {}
@@ -28,7 +28,7 @@ def installed_root(cfg, real):
     # downgrades and prereleases. Never guess from the largest cached folder.
     try:
         result = subprocess.run([real, "plugin", "list", "--json"],
-                                capture_output=True, text=True, timeout=5)
+                                capture_output=True, text=True, encoding="utf-8", timeout=5)
         if result.returncode:
             return None
         for plugin in json.loads(result.stdout).get("installed", []):
@@ -51,7 +51,7 @@ def enabled(cfg):
         return True
     try:
         home = Path(os.environ.get("CODEX_HOME", cfg["codex_home"]))
-        plugin = tomllib.loads((home / "config.toml").read_text()).get("plugins", {}).get(key, {})
+        plugin = tomllib.loads((home / "config.toml").read_text(encoding="utf-8")).get("plugins", {}).get(key, {})
         return isinstance(plugin, dict) and plugin.get("enabled") is True
     except (OSError, ValueError, KeyError, TypeError, AttributeError):
         return False
@@ -81,6 +81,8 @@ def main():
             else:
                 return dispatch(sys.argv[1:], real, cfg)
     os.environ["CODEX_HUD_ROUTE_PID"] = str(os.getpid())
+    if os.name == "nt":
+        return subprocess.call([real, *sys.argv[1:]])
     os.execv(real, [real, *sys.argv[1:]])
 
 

@@ -1,0 +1,15 @@
+{
+  "name": "codex-hud-native-terminal",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Native ConPTY/PTY terminal host for Codex HUD",
+  "license": "MIT",
+  "engines": { "node": ">=20" },
+  "dependencies": {
+    "@lydell/node-pty": "1.2.0-beta.15",
+    "@xterm/headless": "6.0.0"
+  },
+  "scripts": {
+    "test": "node --test ../tests/native_terminal.test.cjs"
+  }
+}

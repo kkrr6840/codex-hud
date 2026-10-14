@@ -1,7 +1,10 @@
 """Read-only agent inspection. Opening a view never resumes a thread."""
 from __future__ import annotations
 
-import curses
+try:
+    import curses
+except ImportError:
+    curses = None
 import json
 from pathlib import Path
 import sqlite3
@@ -125,7 +128,7 @@ def wrapped(lines, width):
     return result
 
 
-def run(runtime):
+def run(runtime, focus=None, root=None, detail=False):
     runtime = Path(runtime)
     spec = read_json(runtime / "spec.json", {})
     if not spec.get("home"):
@@ -137,7 +140,10 @@ def run(runtime):
             pass
         screen.keypad(True)
         screen.timeout(100)
-        identity, selection, selected_key, expanded, scroll = None, 0, None, False, 0
+        initial = read_json(runtime / "snapshot.json", {})
+        identity = root or (initial.get("root") or {}).get("id")
+        inline = bool(focus and detail)
+        selection, selected_key, expanded, scroll = 0, tuple(focus) if focus else None, detail, 0
         refreshed, snapshot, detail_key, body, palette = 0, {}, None, [], None
         while runtime.exists() and not (runtime / "exit.json").exists():
             if time.monotonic()-refreshed >= 1:
@@ -146,6 +152,7 @@ def run(runtime):
             current = (snapshot.get("root") or {}).get("id")
             if current != identity:
                 identity, selected_key, selection, expanded, scroll = current, None, 0, False, 0
+                inline = False
             items = entries(snapshot)
             if selected_key:
                 match = next((i for i, item in enumerate(items) if item["key"] == selected_key), None)
@@ -168,7 +175,7 @@ def run(runtime):
                     except curses.error:
                         pass
             line(0, "Codex HUD · Agents · read-only" if en else "Codex HUD · Agent 选择器 · 只读", curses.A_BOLD)
-            line(1, ("↑↓ scroll · Esc list · q close" if en else "↑↓ 滚动 · Esc 返回列表 · q 关闭") if expanded else ("↑↓ select · Enter inspect · Esc/q close" if en else "↑↓ 选择 · Enter 查看 · Esc/q 返回主会话"))
+            line(1, ("↑↓ scroll · Esc back to HUD · q back to input" if en else "↑↓ 滚动 · Esc 返回 HUD · q 返回输入") if inline else ("↑↓ scroll · Esc list · q close" if en else "↑↓ 滚动 · Esc 返回列表 · q 关闭") if expanded else ("↑↓ select · Enter inspect · Esc/q close" if en else "↑↓ 选择 · Enter 查看 · Esc/q 返回主会话"))
             room = max(1, height-4)
             if expanded and items:
                 current_detail = (identity, items[selection]["key"], snapshot.get("time"), en, width)
@@ -192,7 +199,9 @@ def run(runtime):
             screen.refresh()
             key = screen.getch()
             if key == ord("q") or (key == 27 and not expanded):
-                return
+                return "main"
+            if key == 27 and inline:
+                return "hud"
             if key == 27:
                 expanded, scroll = False, 0
             elif key in (10, 13, curses.KEY_ENTER) and items:
@@ -208,9 +217,14 @@ def run(runtime):
             if items:
                 selected_key = items[selection]["key"]
     try:
-        curses.wrapper(ui)
+        destination = curses.wrapper(ui)
     finally:
         if runtime.exists() and spec.get("socket") and spec.get("top"):
-            subprocess.run(["tmux", "-L", spec["socket"], "select-pane", "-t", spec["top"]],
+            nav = read_json(runtime / "navigation.json", {})
+            target = spec["hud"] if locals().get("destination") == "hud" and nav.get("root") == root and tuple(nav.get("key") or []) == tuple(focus or []) else spec["top"]
+            if target == spec["top"]:
+                from .keys import clear
+                clear(runtime, spec)
+            subprocess.run(["tmux", "-L", spec["socket"], "select-pane", "-t", target],
                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=3)
     return 0

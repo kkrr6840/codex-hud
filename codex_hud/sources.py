@@ -16,7 +16,7 @@ from datetime import datetime
 
 def read_json(path, default=None):
     try:
-        return json.loads(Path(path).read_text())
+        return json.loads(Path(path).read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return default
 
@@ -24,7 +24,7 @@ def read_json(path, default=None):
 def atomic_json(path, value):
     path = Path(path)
     pending = path.with_suffix(f".{os.getpid()}.tmp")
-    pending.write_text(json.dumps(value, ensure_ascii=False))
+    pending.write_text(json.dumps(value, ensure_ascii=False), encoding="utf-8")
     pending.chmod(0o600)
     pending.replace(path)
 
@@ -489,11 +489,11 @@ class Collector:
     def collect(self, options=None):
         now = time.time()
         errors = []
-        if self.runner and now - self.last_bind >= 2:
+        if (self.runner or self.diagnostic) and now - self.last_bind >= 2:
             self.last_bind = now
             try:
                 identified = self.diagnostic.bind(self.home) if self.diagnostic else None
-                identity, path = identified if identified else (None, bind_rollout(self.runner, self.home))
+                identity, path = identified if identified else (None, bind_rollout(self.runner, self.home) if self.runner and os.name != "nt" else None)
                 if path != self.root_path or (identity and identity != self.root_id):
                     self.root_path, self.root_id = path, identity
                     self.readers.clear()
@@ -646,7 +646,7 @@ class Collector:
 
     def environment(self):
         try:
-            config = tomllib.loads((self.home / "config.toml").read_text())
+            config = tomllib.loads((self.home / "config.toml").read_text(encoding="utf-8"))
             return {"mcp": sum(v.get("enabled", True) is not False for v in config.get("mcp_servers", {}).values() if isinstance(v, dict)),
                     "plugins": sum(v.get("enabled") is True for v in config.get("plugins", {}).values() if isinstance(v, dict)),
                     "instructions": int((self.home / "AGENTS.md").is_file())}

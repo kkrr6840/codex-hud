@@ -1,6 +1,9 @@
 from __future__ import annotations
 
-import curses
+try:
+    import curses
+except ImportError:
+    curses = None
 from dataclasses import dataclass
 from pathlib import Path
 import unicodedata
@@ -78,6 +81,7 @@ def capacity_color(fraction):
 class Row:
     spans: list[tuple[str, str]]
     pinned: bool = False
+    key: tuple[str, str] | None = None
 
     @property
     def text(self):
@@ -107,7 +111,7 @@ def init_colors(config=None):
         curses.init_pair(index, color, -1)
 
 
-def paint(screen, snapshot, scroll=0, expanded=False):
+def paint(screen, snapshot, scroll=0, expanded=False, selected_key=None):
     height, width = screen.getmaxyx()
     width = min(width, (snapshot.get("display") or {}).get("max_width") or width)
     rows = render_rows(snapshot, width)
@@ -122,17 +126,23 @@ def paint(screen, snapshot, scroll=0, expanded=False):
     pinned = rows[:pinned_count]
     details = rows[pinned_count:]
     overflow = len(rows) > height
-    footer = expanded or overflow
+    footer = expanded or overflow or selected_key is not None
     max_pinned = max(0, height - int(footer) - int(bool(details)))
     details = pinned[max_pinned:] + details
     pinned = pinned[:max_pinned]
     room = max(0, height - len(pinned) - int(footer))
     scroll = max(0, min(scroll, max(0, len(details) - room)))
+    if selected_key is not None:
+        target = next((i for i, row in enumerate(details) if row.key == selected_key), None)
+        if target is not None and (target < scroll or target >= scroll+room):
+            scroll = max(0, target-room+1) if target >= scroll+room else target
     visible = pinned + details[scroll:scroll + room]
     if footer:
         remaining = max(0, len(details) - scroll - room)
         language = (snapshot.get("display") or {}).get("language")
-        if language == "en":
+        if selected_key is not None:
+            hint = " ↑↓ select · Enter inspect · Esc back to input" if language == "en" else " ↑↓ 選擇 · Enter 檢視 · Esc 返回輸入" if language == "zh-Hant" else " ↑↓ 选择 · Enter 查看 · Esc 返回输入"
+        elif language == "en":
             hint = " ↑↓ scroll · Esc back to CLI" if expanded else f" … {remaining} more rows · Ctrl-b H expand"
         elif language == "zh-Hant":
             hint = " ↑↓ 捲動 · Esc 返回 CLI" if expanded else f" … 另有 {remaining} 行 · Ctrl-b H 展開"
@@ -149,6 +159,8 @@ def paint(screen, snapshot, scroll=0, expanded=False):
                 attr = curses.color_pair(COLORS.get(kind, 0))
                 if kind == "model":
                     attr |= curses.A_BOLD
+                if row.key == selected_key and selected_key is not None:
+                    attr = curses.A_REVERSE | curses.A_BOLD
                 screen.addstr(y, x, rendered, attr)
             except curses.error:
                 pass

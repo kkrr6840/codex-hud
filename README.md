@@ -12,7 +12,14 @@
 
 ## 安装
 
-已在 macOS 15、arm64、Codex CLI 0.162.1 上实测。需要 Python 3.11+、tmux 3.2+（设置弹窗）和 lsof；Git 状态显示还需要 Git。macOS 缺少依赖时可以安装：
+支持 macOS 和原生 Windows PowerShell / Windows Terminal。Git 状态显示需要 Git。
+
+| 平台 | 依赖与后端 |
+| --- | --- |
+| macOS | Python 3.11+、tmux 3.2+、lsof；已在 macOS 15 / arm64 / Codex CLI 0.162.1 实测 |
+| Windows | Python 3.11+、Node.js 20+（含 npm）、官方 Codex CLI；使用 ConPTY，无需 WSL 或 tmux |
+
+macOS 缺少依赖时可以安装：
 
 ```sh
 brew install python tmux
@@ -27,11 +34,15 @@ codex plugin add codex-hud@codex-hud
 
 添加市场后，也可以在 Codex 的 `/plugins` 中管理这个插件。
 
+Windows 同样使用上面的插件安装命令。首次开启时，安装器下载固定版本的原生终端依赖；不需要自行编译。
+
 ## 配置一次，之后自动显示
 
 安装后重新进入 Codex，在 `/skills` 中选择 **hud**，发送“开启自动 HUD”。也可以显式调用 `$hud`。配置 skill 会运行本插件的安装器，无需自己输入启动或 tmux 命令。
 
 配置会创建用户目录下的 `~/.local/bin/codex` 启动包装，并向 shell rc 添加一段带标记的 PATH 设置。原来的 Codex 程序、登录信息、模型配置和已有 shell 函数保持原样。已有代理函数调用外部 `codex` 时，代理环境会继续传递。已有其他同名本地启动器时会停止，避免覆盖。
+
+Windows 创建 `~/.local/bin/codex.cmd`，在已安装的 Windows PowerShell / PowerShell 7 profile 中加入带标记的 PATH 设置。首次配置后新开一次终端标签页，以后照常输入 `codex` 即可。中文路径、参数、代理环境和官方 CLI 退出码都会保留；不会更改 PowerShell 执行策略或覆盖 npm 的 `.ps1` / `.cmd`。
 
 **v0.4.1 起，官方 npm 符号链接入口支持旧终端直接生效，无需 `rehash`。** 安装器核对入口属于 `@openai/codex` 包的 `bin.codex`，且链接由当前用户拥有、目录可写后，把该链接接入 HUD 启动器。官方包文件保持原样，真实 CLI 路径和原链接会先保存；移除启动包装时自动恢复原链接。仅当链接仍由 HUD 管理时才恢复，保留 npm 升级或用户自行更换的入口。npm 更新如果重建了这个链接，可再次调用 hud skill“开启自动 HUD”以重新接入。
 
@@ -43,7 +54,7 @@ codex plugin add codex-hud@codex-hud
 
 ## 选择显示内容（v0.4）
 
-**按 Ctrl-b，松开后按大写 C** 打开设置菜单，方向键选择、空格开关，`1/2/3` 选择精简/标准/完整预设，`L` 切换紧凑/展开布局，`G` 切换语言，`Esc` 关闭。修改即时保存，约一秒后刷新，不用重新进入会话。
+**按 Ctrl-b，松开后按大写 C** 打开设置菜单。Mac 中方向键选择、空格开关，`1/2/3` 选择精简/标准/完整预设，`L` 切换布局、`G` 切换语言；Windows 中用 ↑/↓ 选择预设、Enter 应用，也可用 F8 打开。`Esc` 关闭。修改即时保存，约一秒后刷新，不用重新进入会话。两端均可通过 hud skill 修改全部设置。
 
 也可以在 `/skills` 选择 **hud**，直接说“只保留模型、上下文和额度”“隐藏分流”“显示 Git 领先落后”“用英文紧凑布局”。高级配置同样可通过这个 skill 修改，无需手改配置文件。
 
@@ -78,17 +89,26 @@ codex plugin add codex-hud@codex-hud
 
 主面板的“主会话 Token”优先采用 `token_usage_record.thread_token_usage`，必须匹配当前线程 ID，之后不让其他汇总事件覆盖它。原生子 agent 和分流用量仅出现在自己的活动行，不相加到主会话上下文或累计值。累计输入会重复计算各次请求送入的历史内容，所以可远大于上下文窗口；缓存属于输入的一部分。失败的分流任务未回传用量时只显示一次“未返回用量”，不填成零。
 
-`Ctrl-b H` 展开或收起详情；在 HUD 中使用方向键或 `j/k` 滚动，`Esc` 回到 CLI。正常输入 `/quit` 退出，临时诊断日志、HUD 进程和私有 tmux 会话会自动清理。
+Mac 的 `Ctrl-b H` 展开或收起整个面板，在展开视图中用方向键或 `j/k` 滚动。正常输入 `/quit` 退出，两端都会清理自己的临时日志和 HUD 后台进程。
 
-## 选择并查看 agent（v0.5）
+## 直接选择并查看 agent（v0.6）
 
-按 **Alt+↓** 打开选择器；也可以按 **Ctrl-b**，松开后按 **↓**。HUD 面板获得焦点时，紧凑视图中按下箭头也能打开列表。普通 CLI 输入框的上下箭头保持原来的输入行为。
+在默认的空输入框中直接按 **↓**，就会选中下面 HUD 的第一个 agent，选中行高亮显示。用 **↑/↓** 切换、**Enter** 查看详情；详情中 **Esc** 返回 HUD，再按 **Esc** 返回输入框。第一项按 **↑** 也能回到输入框。有草稿、打开原生菜单或没有可选 agent 时，下箭头继续交给官方 CLI。
 
-列表统一展示当前会话的原生子 agent 和关联分流任务。用 **↑/↓** 选择，按 **Enter** 查看任务、模型、状态、耗时、用量、最近工具和最新可读输出；详情中上下箭头滚动，**Esc** 返回列表，再按 Esc 返回主会话，**q** 直接关闭。状态与输出随后台记录更新。
+| 操作 | Mac | Windows |
+| --- | --- | --- |
+| 从空输入框选中 agent | ↓ | ↓ |
+| 切换 / 查看 / 返回 | ↑↓ / Enter / Esc | ↑↓ / Enter / Esc |
+| 辅助入口 | Option（⌥）+↓，或 Ctrl-b 后 ↓ | Alt+↓，或 Ctrl-b 后 ↓ |
+| 设置菜单 | Ctrl-b 后大写 C | Ctrl-b 后大写 C，或 F8 |
+
+如果 Mac 终端把 Option 当作系统快捷键，使用直接 ↓ 或 Ctrl-b 后 ↓。辅助入口在 Mac 打开列表，在 Windows 直接选中 HUD 行。
+
+原生子 agent 和当前会话关联的分流任务均可查看任务、模型、状态、耗时、用量、最近工具和最新可读输出。状态与输出持续刷新，长回答可用上下箭头滚动；不会重启主 CLI。默认占位提示以外的输入界面使用辅助入口。
 
 选择器只读取日志和已返回的分流结果，不重新启动或恢复子会话，因此不会额外抢占会话写入权。原生输出读取日志尾部最多 128 KB 中最近五段 assistant 记录；继承的、早于子会话创建时间的父会话记录会排除。未保存 worker 日志的分流任务可显示其实际返回的结果；超出读取范围、加密内容和尚未产生的输出会明确提示。未知用量保持未知。Codex 的原生 **`/subagents`** 也可切换到子 agent 的完整会话界面，并继续它的工作。
 
-插件升级后，可让 hud skill 执行 `codex-hud refresh --session <当前会话 ID>`，只替换观察面板，保持 CLI 进程和对话继续。`codex-hud watch --session <ID>` 可在独立终端只读监视指定会话；它固定监视该 ID，不自动跟随另一个客户端的 `/new`。
+Mac 插件升级后，可让 hud skill 执行 `codex-hud refresh --session <当前会话 ID>`，只替换观察面板，保持 CLI 进程和对话继续；Windows 后端的代码升级在下次正常启动生效，两端显示配置都支持实时更新。Mac 的 `codex-hud watch --session <ID>` 可在独立终端只读监视指定会话；Windows 可用 `watch --session <ID> --once` 核对数据。
 
 ## 与 Claude HUD 的功能对照
 
@@ -103,26 +123,28 @@ codex plugin add codex-hud@codex-hud
 | 会话/每日/每周费用、路由费用、纯 API 输出速度、prompt cache 到期 | 当前 Codex 数据不完整，暂不支持；不以 token 估算真实账单，不把工具等待算成 API 速度，不猜缓存 TTL |
 | 活动 Skill、advisor、输出风格、登录用户名 | 无可靠对应事件或属于 Claude 专有字段；不把读取 SKILL.md 当成技能执行 |
 | jj、外部额度文件/写出、额外状态命令、余额来源合并 | 本版未实现；不会拿 Claude 的账号窗口补 Codex 缺失额度 |
-| 原生 statusLine 回调 | Codex HUD 使用 tmux 面板，未修改官方 CLI；已有面板支持配置热更新 |
+| 原生 statusLine 回调 | Mac 使用 tmux，Windows 使用 ConPTY 终端后端；未修改官方 CLI，显示配置实时更新 |
 
 恢复长会话时读取日志末尾约 2 MB；工具历史和压缩计数可能不完整，压缩计数会标记 `≥`。官方累计 Token 由记录中的累计字段提供，不将日志尾部相加冒充总量。
 
 ## 运行方式与边界
 
-插件使用独立 tmux 会话运行官方 CLI，为本次调用加入 `--no-daemon` 和私有临时诊断目录。CLI 配置文件中的模型、账号和权限策略继续生效；不会修改用户的 tmux 配置。每个 HUD 按其自己的诊断事件和日志归属绑定线程，包括 `/new` 尚未发消息的阶段。
+Mac 使用独立 tmux 会话；Windows 使用原生 ConPTY，并解析终端屏幕，为 HUD 保留底部空间。两端均运行官方 CLI，为本次调用加入 `--no-daemon` 和私有临时诊断目录。CLI 配置文件中的模型、账号和权限策略继续生效。每个 HUD 按自己的诊断事件绑定线程，包括 `/new` 尚未发消息的阶段。
 
 v0.4.2 为 tmux 外层终端声明同步绘制能力，并为 CLI 面板指定常亮光标，减少嵌套 tmux 时光标隐藏/显示被拆开呈现造成的闪烁。已有面板刷新后常亮样式立即生效；已连接客户端的终端能力由 tmux 在连接时读取，同步绘制声明在下次正常进入时生效。
 
 `exec`、`review`、`debug`、`login`、`plugin` 等非交互命令，帮助/版本查询、管道或重定向输出、远程会话继续使用原 CLI。未知参数语法会保守透传。HUD 不改变审批或网络政策。
 
-这是一份可通过 Codex 插件管理器安装的 skill 插件，加上一次性的本地启动集成。Codex 的[原生状态栏](https://learn.chatgpt.com/docs/cli/slash-commands#configure-footer-items-with-statusline)通过 `/statusline` 配置内建字段；本插件的 agent 和分流面板由 tmux 渲染，未替换或修改官方 CLI。
+这是一份可通过 Codex 插件管理器安装的 skill 插件，加上一次性的本地启动集成。Codex 的[原生状态栏](https://learn.chatgpt.com/docs/cli/slash-commands#configure-footer-items-with-statusline)通过 `/statusline` 配置内建字段；本插件的 agent 和分流面板由终端后端渲染。
 
 ## 开发与检查
 
 ```sh
 python3 -m unittest discover -s tests -v
+npm ci --prefix native --include=optional
+node --test tests/native_terminal.test.cjs
 ```
 
-测试覆盖会话隔离、`/new` 切换、状态及未知用量、透明参数转发、已有启动器保护，以及真实 tmux/PTY 下的自动启动、刷新、窗口尺寸变化和退出清理。
+测试覆盖会话隔离、`/new` 切换、状态及未知用量、透明参数转发、已有启动器保护，以及真实 tmux/PTY 和 ConPTY 的按键、数据桥、中文路径、刷新和退出清理。Windows 验收通过 [GitHub Actions](https://github.com/kkrr6840/codex-hud/actions/workflows/windows-native.yml) 执行，不需要模型请求或账号凭据。
 
 许可证：MIT。

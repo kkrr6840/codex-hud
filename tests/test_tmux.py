@@ -38,12 +38,17 @@ if '--fixture-empty-start' in sys.argv:
     db.close()
 else:tokens(20)
 print('FIXTURE READY',flush=True)
+def composer():
+    if os.environ.get('HUD_TEST_COMPOSER'):
+        print('\\x1b[2J\\x1b[HFixture READY\\r\\n› \\x1b[2mAsk Codex to do anything\\x1b[0m\\x1b[2;3H',end='',flush=True)
+composer()
 for line in sys.stdin:
     if line.strip()=='quit':break
     if line.strip()=='next':tokens(40)
     if line.strip()=='reset':
         f.close();identity=str(uuid.uuid4());f=(folder/f'rollout-{identity}.jsonl').open('a')
         emit('session_meta',{'id':identity,'source':'cli','cwd':str(pathlib.Path.cwd())})
+    composer()
 f.close()
 ''')
         fixture.chmod(0o755)
@@ -176,7 +181,11 @@ f.close()
     def test_agent_popup_navigates_live_output_without_restarting_cli(self):
         self.assert_auto_launch(inspect_agents=True)
 
-    def assert_auto_launch(self, cached=False, terminal="xterm-256color", inspect_agents=False):
+    @unittest.skipUnless(sys.platform == "darwin", "macOS BSD script PTY test")
+    def test_plain_down_selects_inline_agent_and_esc_returns_without_losing_draft(self):
+        self.assert_auto_launch(inspect_agents=True, direct_agents=True)
+
+    def assert_auto_launch(self, cached=False, terminal="xterm-256color", inspect_agents=False, direct_agents=False):
         Path(self.env["CODEX_HUD_SHELL_RC"]).write_text('codex() { HTTP_PROXY="http://fixture.invalid" command codex "$@"; }\n')
         if not cached:
             result = subprocess.run([sys.executable, str(ENTRY), "setup", "--enable"],
@@ -186,6 +195,8 @@ f.close()
         runtimes.mkdir()
         env = dict(self.env, CODEX_HUD_RUNTIME_DIR=str(runtimes), TERM=terminal,
                    HUD_TEST_PYTHON=sys.executable, HUD_TEST_ENTRY=str(ENTRY))
+        if direct_agents:
+            env["HUD_TEST_COMPOSER"] = "1"
         # BSD script owns the PTY lifecycle. Avoid Python pty.fork on macOS,
         # where forking a framework-linked interpreter can leave an exit hang.
         output = (self.base / "terminal-output.log").open("wb")
@@ -234,20 +245,62 @@ f.close()
             before = self.tmux(spec, "display-message", "-p", "-t", spec["top"], "#{pane_pid}").stdout
             def terminal_contains(value):
                 return value in (self.base / "terminal-output.log").read_bytes().decode(errors="replace")
-            # Exercise the actual prefix+Down binding on the attached client.
-            proc.stdin.write(b"\x02\x1b[B"); proc.stdin.flush()
-            self.wait_for(lambda: terminal_contains("Agent 选择器"))
             def popup_pids():
                 output = subprocess.check_output(["ps", "-axo", "pid=,command="], text=True)
                 return [line.split()[0] for line in output.splitlines() if " _agents " + spec["runtime"] in line]
+            def active(pane):
+                return self.tmux(spec, "display-message", "-p", "-t", pane, "#{pane_active}").stdout.strip() == "1"
+            navigation = Path(spec["runtime"])/"navigation.json"
+            if direct_agents:
+                proc.stdin.write(b"\x1b[B"); proc.stdin.flush()
+                self.wait_for(lambda: active(spec["hud"]) and navigation.exists())
+                self.assertEqual(json.loads(navigation.read_text())["key"], ["native", child])
+                self.assertFalse(popup_pids())
+                def highlighted():
+                    return any("inspect-child" in line and "7m" in line for line in self.tmux(spec, "capture-pane", "-p", "-e", "-t", spec["hud"]).stdout.splitlines())
+                self.wait_for(highlighted)
+                # Up at the first entry returns to the unchanged native editor.
+                proc.stdin.write(b"\x1b[A"); proc.stdin.flush()
+                self.wait_for(lambda: active(spec["top"]) and not navigation.exists())
+                proc.stdin.write(b"\x1b[B\r"); proc.stdin.flush()
+            else:
+                # Exercise the actual prefix+Down binding on the attached client.
+                proc.stdin.write(b"\x02\x1b[B"); proc.stdin.flush()
+                self.wait_for(lambda: terminal_contains("Agent 选择器"))
             self.wait_for(popup_pids)
-            proc.stdin.write(b"\r"); proc.stdin.flush()
+            if not direct_agents:
+                proc.stdin.write(b"\r"); proc.stdin.flush()
             self.wait_for(lambda: terminal_contains("Agent output one"))
             result("Agent output two")
             self.wait_for(lambda: terminal_contains("Agent output two"))
-            proc.stdin.write(b"q"); proc.stdin.flush()
+            proc.stdin.write(b"\x1b" if direct_agents else b"q"); proc.stdin.flush()
             self.wait_for(lambda: not popup_pids())
-            self.wait_for(lambda: self.tmux(spec, "display-message", "-p", "-t", spec["top"], "#{pane_active}").stdout.strip() == "1")
+            if direct_agents:
+                self.wait_for(lambda: active(spec["hud"]))
+                proc.stdin.write(b"\x1b"); proc.stdin.flush()
+                self.wait_for(lambda: active(spec["top"]) and not navigation.exists())
+                # Fast editing+Down must remain in the official composer.
+                proc.stdin.write(b"draft\x1b[B"); proc.stdin.flush()
+                self.wait_for(lambda: "draft" in self.tmux(spec, "capture-pane", "-p", "-t", spec["top"]).stdout)
+                time.sleep(.3)
+                self.assertTrue(active(spec["top"]))
+                self.assertFalse(navigation.exists())
+                proc.stdin.write(b"\x15\r"); proc.stdin.flush()
+                self.wait_for(lambda: self.tmux(spec, "display-message", "-p", "-t", spec["top"], "#{cursor_x}").stdout.strip() == "2")
+                proc.stdin.write(b"\x1b[B"); proc.stdin.flush()
+                self.wait_for(lambda: active(spec["hud"]) and navigation.exists())
+                proc.stdin.write("中文 draft".encode()); proc.stdin.flush()
+                self.wait_for(lambda: "中文 draft" in self.tmux(spec, "capture-pane", "-p", "-t", spec["top"]).stdout)
+                self.assertFalse(navigation.exists())
+                proc.stdin.write(b"\x15\r"); proc.stdin.flush()
+                self.wait_for(lambda: self.tmux(spec, "display-message", "-p", "-t", spec["top"], "#{cursor_x}").stdout.strip() == "2")
+                proc.stdin.write(b"\x1b[B"); proc.stdin.flush()
+                self.wait_for(lambda: active(spec["hud"]) and navigation.exists())
+                # /new (fixture reset) clears navigation from the previous root.
+                self.send(spec, "reset")
+                self.wait_for(lambda: self.snapshot(spec).get("root", {}).get("id") not in (None, identity))
+                self.wait_for(lambda: active(spec["top"]) and not navigation.exists())
+            self.wait_for(lambda: active(spec["top"]))
             self.assertEqual(self.tmux(spec, "display-message", "-p", "-t", spec["top"], "#{pane_pid}").stdout, before)
         self.send(spec, "quit")
         self.wait_for(lambda: not Path(spec["runtime"]).exists())

@@ -22,9 +22,9 @@ class View:
     def state(self, state):
         return {"running": self.tr("运行", "running", "執行"), "idle": self.tr("待命", "idle"), "completed": self.tr("完成", "done"), "failed": self.tr("失败", "failed", "失敗"), "unknown": self.tr("未知", "unknown")}.get(state, state)
 
-    def put(self, section, spans, pinned=False):
+    def put(self, section, spans, pinned=False, key=None):
         if spans:
-            self.sections.setdefault(section, []).append(Row(spans, pinned))
+            self.sections.setdefault(section, []).append(Row(spans, pinned, key))
 
     def color(self, percent):
         return "bad" if percent >= self.c["critical_percent"] else "warn" if percent >= self.c["warning_percent"] else "good"
@@ -226,7 +226,7 @@ class View:
             for state in ("running", "completed", "idle", "failed", "unknown"):
                 if counts[state]:
                     spans.append((f" {counts[state]} {self.state(state)}", STATE_COLOR[state]))
-            spans.append((" · Alt+↓ " + self.tr("查看", "inspect", "檢視"), "dim"))
+            spans.append((" · ↓ " + self.tr("选择", "select", "選擇"), "dim"))
             self.put(name, spans)
             limit = self.c["agents_limit"] or len(items)
             for item in items[:limit]:
@@ -249,7 +249,7 @@ class View:
                 task = clean(item.get("task", "")).removesuffix(" (任务名；详细指令加密)")
                 if task:
                     spans.append((" · " + task, "muted"))
-                self.put(name, spans)
+                self.put(name, spans, key=("native" if name == "agents" else "relay", item.get("id")))
             if len(items) > limit:
                 self.put(name, [(f" +{len(items)-limit} " + self.tr("项", "more", "項"), "dim")])
 
@@ -288,7 +288,7 @@ class View:
                 same_group = any(previous in group and section in group for group in self.c["merge_groups"])
                 merge = result and ((self.c["layout"] == "compact" and section in ("context", "quota", "tokens", "cache", "session")) or same_group or (section == previous == "quota" and self.c["quota_style"] == "compact"))
                 gap = " │ " if self.c["separators"] else "  "
-                if merge and cell_width(result[-1].text + gap + row.text.lstrip()) < self.width:
+                if merge and not row.key and not result[-1].key and cell_width(result[-1].text + gap + row.text.lstrip()) < self.width:
                     if section in self.c["right_align"]:
                         gap = " " * max(len(gap), self.width-1-cell_width(result[-1].text)-cell_width(row.text.lstrip()))
                     result[-1].spans += [(gap, "dim"), *[(text.lstrip() if i == 0 else text, color) for i, (text, color) in enumerate(row.spans)]]

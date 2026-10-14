@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import argparse
-import curses
+try:
+    import curses
+except ImportError:  # Native Windows renders through ConPTY, not curses.
+    curses = None
 import json
 import os
 from pathlib import Path
@@ -46,6 +49,11 @@ def bind_agents(spec):
     popup = ("display-popup", "-E", "-w", "90%", "-h", "85%", command("_agents", spec["runtime"]))
     tmux(spec["socket"], "bind-key", "Down", *popup)
     tmux(spec["socket"], "bind-key", "-n", "M-Down", *popup)
+    tmux(spec["socket"], "bind-key", "-n", "Down", "run-shell", command("_down", spec["runtime"], "#{pane_id}"))
+    active = "#{&&:#{==:#{@hud-nav},1},#{||:#{==:#{pane_id}," + spec["hud"] + "},#{&&:#{==:#{pane_id}," + spec["top"] + "},#{==:#{pane_active},0}}}}"
+    for key in ("Up", "Enter", "Escape"):
+        tmux(spec["socket"], "bind-key", "-n", key, "if-shell", "-F", active,
+             shlex.join(["send-keys", "-t", spec["hud"], key]), shlex.join(["send-keys", key]))
 
 
 def launch(argv):
@@ -61,6 +69,9 @@ def launch(argv):
         cli_args = extra + argv[split + 1:]
     else:
         options, cli_args = parser.parse_known_args(argv)
+    if os.name == "nt" or os.environ.get("CODEX_HUD_NATIVE_BACKEND") == "1":
+        from .native import launch as native_launch
+        return native_launch(cli_args, options.hud_height, options.detach)
     if not shutil.which("tmux"):
         parser.error("缺少 tmux，请运行 brew install tmux")
     from .integration import resolve_codex
@@ -256,8 +267,62 @@ def panel(runtime):
         while True:
             if (runtime / "exit.json").exists():
                 break
-            key = screen.getch()
-            if key == curses.KEY_DOWN and not expanded and snapshot and (snapshot["agents"] or snapshot["offload"]["jobs"]):
+            nav = read_json(runtime / "navigation.json", {})
+            selected = (tuple(nav.get("key") or []) or None) if snapshot else None
+            view = snapshot
+            if selected and snapshot:
+                from .keys import clear
+                view = {**snapshot, "display": {**snapshot["display"], "agents_limit": 0}}
+                choices = [row.key for row in render_rows(view) if row.key]
+                main_active = tmux(spec["socket"], "display-message", "-p", "-t", spec["top"], "#{pane_active}").stdout.strip() == "1"
+                if nav.get("root") != snapshot["root"].get("id") or selected not in choices or main_active:
+                    clear(runtime, spec)
+                    if not main_active:
+                        tmux(spec["socket"], "select-pane", "-t", spec["top"])
+                    selected = None
+                    view = snapshot
+            try:
+                raw_key = screen.get_wch()
+            except curses.error:
+                raw_key = None
+            # Unicode codepoints can overlap curses' integer key constants.
+            key = (ord(raw_key) if ord(raw_key) < 128 else -2) if isinstance(raw_key, str) else raw_key if raw_key is not None else -1
+            if key != -1 and not selected and tmux(spec["socket"], "display-message", "-p", "-t", spec["top"], "#{pane_active}").stdout.strip() == "1":
+                # A burst can already be buffered in this pane when typing
+                # returns focus to the CLI. Forward the rest instead of losing
+                # the second character (including multibyte Unicode input).
+                names = {curses.KEY_DOWN: "Down", curses.KEY_UP: "Up", curses.KEY_LEFT: "Left",
+                         curses.KEY_RIGHT: "Right", curses.KEY_HOME: "Home", curses.KEY_END: "End",
+                         curses.KEY_BACKSPACE: "BSpace", curses.KEY_DC: "DC", curses.KEY_ENTER: "Enter"}
+                if isinstance(raw_key, str):
+                    tmux(spec["socket"], "send-keys", "-t", spec["top"], "-l", raw_key)
+                elif key in names:
+                    tmux(spec["socket"], "send-keys", "-t", spec["top"], names[key])
+                key, raw_key = -1, None
+            if selected and key in (curses.KEY_DOWN, curses.KEY_UP, 10, 13, curses.KEY_ENTER, 27):
+                from .keys import clear
+                if key == 27 or (key == curses.KEY_UP and choices.index(selected) == 0):
+                    clear(runtime, spec)
+                    selected = None
+                    tmux(spec["socket"], "select-pane", "-t", spec["top"])
+                elif key in (10, 13, curses.KEY_ENTER):
+                    subprocess.Popen(["tmux", "-L", spec["socket"], "display-popup", "-E", "-w", "90%", "-h", "85%",
+                                      command("_agents", runtime, "--focus", json.dumps(selected), "--root", nav["root"], "--detail")],
+                                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                else:
+                    index = max(0, min(len(choices)-1, choices.index(selected)+(1 if key == curses.KEY_DOWN else -1)))
+                    selected = choices[index]
+                    atomic_json(runtime / "navigation.json", {"root": nav["root"], "key": selected})
+            elif selected and (isinstance(raw_key, str) or key == curses.KEY_BACKSPACE):
+                from .keys import clear
+                clear(runtime, spec)
+                selected = None
+                tmux(spec["socket"], "select-pane", "-t", spec["top"])
+                if key in (8, 127, curses.KEY_BACKSPACE):
+                    tmux(spec["socket"], "send-keys", "-t", spec["top"], "BSpace")
+                else:
+                    tmux(spec["socket"], "send-keys", "-t", spec["top"], "-l", raw_key)
+            elif key == curses.KEY_DOWN and not expanded and snapshot and (snapshot["agents"] or snapshot["offload"]["jobs"]):
                 subprocess.Popen(["tmux", "-L", spec["socket"], "display-popup", "-E", "-w", "90%", "-h", "85%", command("_agents", runtime)],
                                  stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             elif key in (curses.KEY_DOWN, ord("j")):
@@ -292,7 +357,17 @@ def panel(runtime):
                 atomic_json(runtime / "snapshot.json", snapshot)
                 expanded = sync_layout(spec, snapshot)
                 refresh = time.monotonic()
-            scroll = paint(screen, snapshot, scroll, expanded)
+            if selected and snapshot:
+                view = {**snapshot, "display": {**snapshot["display"], "agents_limit": 0}}
+                if nav.get("root") != snapshot["root"].get("id") or selected not in [r.key for r in render_rows(view) if r.key]:
+                    from .keys import clear
+                    clear(runtime, spec)
+                    tmux(spec["socket"], "select-pane", "-t", spec["top"])
+                    selected = None
+                    view = snapshot
+            else:
+                view = snapshot
+            scroll = paint(screen, view, scroll, expanded, selected)
             time.sleep(0.1)
     try:
         curses.wrapper(ui)
@@ -347,6 +422,8 @@ def observe(argv):
         for row in render_rows(collect()):
             print(row.text)
         return 0
+    if curses is None:
+        parser.error("此平台的只读数据核对请使用 --once；交互 HUD 使用原生终端后端")
     if not sys.stdin.isatty() or not sys.stdout.isatty():
         parser.error("请在终端分屏中运行；数据核对可用 --once")
     def ui(screen):
@@ -430,7 +507,19 @@ def main(argv=None):
         return configure(argv[1:])
     if argv and argv[0] == "_agents":
         from .agents import run
-        return run(argv[1])
+        parser = argparse.ArgumentParser(add_help=False)
+        parser.add_argument("runtime")
+        parser.add_argument("--focus", type=json.loads)
+        parser.add_argument("--root")
+        parser.add_argument("--detail", action="store_true")
+        args = parser.parse_args(argv[1:])
+        return run(args.runtime, args.focus, args.root, args.detail)
+    if argv and argv[0] == "_down":
+        from .keys import down
+        return down(argv[1], argv[2])
+    if argv and argv[0] == "_native_bridge":
+        from .native import bridge
+        return bridge(argv[1])
     if argv and argv[0] in ("_run", "_panel", "_toggle", "_watch"):
         return {"_run": runner, "_panel": panel, "_toggle": toggle, "_watch": watch}[argv[0]](argv[1])
     if argv and argv[0] == "inspect":
