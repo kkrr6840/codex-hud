@@ -661,7 +661,7 @@ class Collector:
         if cwd:
             try:
                 result = subprocess.run(["git", "-C", cwd, "status", "--porcelain=v1", "--branch"],
-                                        capture_output=True, text=True, timeout=2,
+                                        stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=2,
                                         env={**os.environ, "GIT_OPTIONAL_LOCKS": "0"})
                 if result.returncode == 0:
                     lines = result.stdout.splitlines()

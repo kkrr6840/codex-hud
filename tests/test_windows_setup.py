@@ -610,9 +610,9 @@ class FakeCodex {
                     # identity preserves the assertion across either form.
                     self.assertTrue(os.path.samefile(found["selected"], self.wrapper), found)
                     candidates = [item["path"] for item in found["commands"] if item.get("path")]
-                    for original in (npm_cmd, npm_ps1):
-                        self.assertTrue(any(os.path.samefile(candidate, original) for candidate in candidates),
-                                        f"Original npm entry was not discovered: {original}; commands={found}")
+                    for original_entry in (npm_cmd, npm_ps1):
+                        self.assertTrue(any(os.path.samefile(candidate, original_entry) for candidate in candidates),
+                                        f"Original npm entry was not discovered: {original_entry}; commands={found}")
                     self.assert_forwarded(result, ["--version"])
             with redirect_stdout(io.StringIO()):
                 self.assertEqual(setup.configure(["--uninstall"]), 0)

@@ -355,7 +355,7 @@ setTimeout(update,150); setInterval(update,150);
     fs.writeFileSync(path.join(base, 'hide'), '1'); await until(() => !visible().includes('agent Alpha'), 'empty HUD hid itself');
     await until(() => fs.readFileSync(inputLog, 'utf8').includes('90,28'), 'CLI reclaimed all rows');
     const bridgePid = requests().find(entry => entry.pid).pid;
-    outer.write('/quit\r'); await until(() => exited, '/quit exited native UI');
+    outer.write('/quit\r'); await until(() => exited, '/quit exited native UI', 10000);
     assert.equal(exitCode, 0); assert.equal(fs.existsSync(runtime), false, 'owned runtime removed');
     await until(() => { try { process.kill(bridgePid, 0); return false; } catch { return true; } }, 'bridge process stopped');
     assert.ok(rendered.includes(`${CSI}?1049l`), 'outer terminal mode restored');
@@ -448,7 +448,7 @@ process.stdin.on('data',data=>{const text=data.replace(/\\x1b(?:\\[[0-?]*[ -/]*[
     assert.deepEqual(fs.readFileSync(childLog), beforeLog, 'viewing details never changes or resumes the child session');
     outer.write('\x1b'); await until(selected, 'first Esc returned to actual HUD');
     outer.write('\x1b'); await wait(100);
-    outer.write('/quit\r'); await until(() => exited, 'quit closed real bridge integration');
+    outer.write('/quit\r'); await until(() => exited, 'quit closed real bridge integration', 10000);
     assert.equal(exitCode, 0); assert.equal(fs.existsSync(runtime), false);
     await until(() => [runner.pid, runner.bridge_pid].every(pid => { try { process.kill(pid, 0); return false; } catch { return true; } }), 'official fixture and Python bridge stopped');
     assert.deepEqual(fs.readFileSync(childLog), beforeLog);

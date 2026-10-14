@@ -507,11 +507,14 @@ async function run(runtime, options = {}) {
       for (const [name, handler] of Object.entries(signals)) process.removeListener(name, handler);
       stdout.write(`${CSI}0m${CSI}?2004l${CSI}?1004l${CSI}?9l${CSI}?1000l${CSI}?1002l${CSI}?1003l${CSI}?1006l${CSI}?25h${CSI}?7h${CSI}?1049l`);
       debug(`cleanup code=${code} cli_pid=${child?.pid} bridge_pid=${bridge?.pid}`);
-      if (child && !childExited) {
+      // Windows node-pty's normal exit closes only its output socket; its
+      // ConPTY output worker remains referenced until public kill() disposes
+      // it. Release our PTY even when the official process already exited.
+      if (child && (!childExited || process.platform === 'win32')) {
         try { child.kill(); } catch (error) { log(error.message); }
         // Windows node-pty closes ConPTY and kills its console list
         // asynchronously. Terminate only our verified direct child promptly.
-        if (process.platform === 'win32' && Number.isInteger(child.pid) && child.pid > 0) {
+        if (!childExited && process.platform === 'win32' && Number.isInteger(child.pid) && child.pid > 0) {
           try { process.kill(child.pid); } catch (error) { if (error.code !== 'ESRCH') log(error.message); }
         }
       }
@@ -529,6 +532,12 @@ async function run(runtime, options = {}) {
         // Retry asynchronously, so socket/process exit events can still run.
         try { await fs.promises.rm(runtime, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }); }
         catch (error) { code = 1; (options.stderr || process.stderr).write(`Codex HUD cleanup: ${error.message}\n`); }
+        if (process.env.CODEX_HUD_NATIVE_DEBUG === '1') {
+          // Public resource types only, after the UI has restored the outer
+          // terminal. An unref'd probe runs only if a handle keeps us alive.
+          const probe = setTimeout(() => (options.stderr || process.stderr).write(`Codex HUD shutdown resources: ${JSON.stringify(process.getActiveResourcesInfo())}\n`), 1500);
+          probe.unref();
+        }
         resolve(code);
       })();
       return cleanupPromise;
