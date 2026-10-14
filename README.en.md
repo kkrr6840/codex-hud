@@ -92,6 +92,8 @@ Quota bars use official rate-limit snapshots received by the current thread. The
 
 Codex HUD uses a private tmux session and launches the official CLI with `--no-daemon` and a private diagnostic directory. It does not modify the official CLI binary or your tmux configuration. Non-interactive commands, help/version queries, redirected output, and remote sessions pass through to the official CLI. CLI approval and network policies still apply.
 
+Starting with v0.4.2, the private server enables synchronized updates for an outer tmux terminal and uses an explicit steady cursor in the CLI pane. This reduces visible cursor hide/show transitions in nested tmux sessions. Refresh applies the steady cursor immediately; tmux reads terminal capabilities when a client connects, so the synchronized-update declaration applies on the next normal entry for an already attached client.
+
 ## Disable or remove
 
 Ask the hud skill to **disable automatic HUD** or **remove its launcher integration**. Disabling or removing the native plugin makes the launcher pass through to the official CLI. Removing launcher integration also restores its managed npm link and removes its marked PATH block; an entry changed by you or a package update is preserved.

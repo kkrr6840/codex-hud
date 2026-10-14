@@ -5,6 +5,7 @@ import curses
 import json
 import os
 from pathlib import Path
+import re
 import shlex
 import shutil
 import signal
@@ -27,6 +28,18 @@ def tmux(socket, *args, check=True):
 
 def command(*args):
     return shlex.join([sys.executable, str(ENTRY), *map(str, args)])
+
+
+def configure_terminal(spec):
+    """Keep frame/cursor changes together, including an outer tmux terminal."""
+    socket = spec["socket"]
+    # Explicitly request a steady cursor rather than a terminal-dependent
+    # default. This affects only the CLI pane in this private HUD server.
+    tmux(socket, "set-option", "-p", "-t", spec["top"], "cursor-style", "block")
+    features = tmux(socket, "show-options", "-s", "terminal-features").stdout
+    if "tmux*:sync" not in features:
+        indices = [int(i) for i in re.findall(r"terminal-features\[(\d+)\]", features)]
+        tmux(socket, "set-option", "-s", f"terminal-features[{max(indices, default=-1) + 1}]", "tmux*:sync")
 
 
 def launch(argv):
@@ -72,6 +85,7 @@ def launch(argv):
                        "-x", options.width, "-y", options.height, "-c", os.getcwd(),
                        "-P", "-F", "#{pane_id}", command("_run", runtime))
         spec["top"] = created.stdout.strip()
+        configure_terminal(spec)
         tmux(socket, "set-option", "-g", "status", "off")
         tmux(socket, "set-option", "-g", "mouse", "on")
         tmux(socket, "set-option", "-g", "exit-empty", "on")
@@ -379,6 +393,7 @@ def refresh_panels(argv):
             continue
         socket = spec["socket"]
         before = tmux(socket, "display-message", "-p", "-t", spec["top"], "#{pane_pid}").stdout.strip()
+        configure_terminal(spec)
         tmux(socket, "respawn-pane", "-k", "-t", spec["hud"], command("_panel", runtime))
         tmux(socket, "bind-key", "H", "run-shell", command("_toggle", runtime))
         tmux(socket, "bind-key", "C", "display-popup", "-E", "-w", "85%", "-h", "85%", command("config", "--menu"))

@@ -168,7 +168,11 @@ f.close()
         (self.bin / "codex").symlink_to(target)
         self.assert_auto_launch(cached=True)
 
-    def assert_auto_launch(self, cached=False):
+    @unittest.skipUnless(sys.platform == "darwin", "macOS BSD script PTY test")
+    def test_nested_tmux_terminal_uses_synchronized_updates_and_steady_cursor(self):
+        self.assert_auto_launch(terminal="tmux-256color")
+
+    def assert_auto_launch(self, cached=False, terminal="xterm-256color"):
         Path(self.env["CODEX_HUD_SHELL_RC"]).write_text('codex() { HTTP_PROXY="http://fixture.invalid" command codex "$@"; }\n')
         if not cached:
             result = subprocess.run([sys.executable, str(ENTRY), "setup", "--enable"],
@@ -176,7 +180,7 @@ f.close()
             self.assertEqual(result.returncode, 0, result.stderr)
         runtimes = self.base / "runtimes"
         runtimes.mkdir()
-        env = dict(self.env, CODEX_HUD_RUNTIME_DIR=str(runtimes), TERM="xterm-256color",
+        env = dict(self.env, CODEX_HUD_RUNTIME_DIR=str(runtimes), TERM=terminal,
                    HUD_TEST_PYTHON=sys.executable, HUD_TEST_ENTRY=str(ENTRY))
         # BSD script owns the PTY lifecycle. Avoid Python pty.fork on macOS,
         # where forking a framework-linked interpreter can leave an exit hang.
@@ -199,6 +203,14 @@ f.close()
         with (Path(spec["home"]) / "sessions" / f"rollout-{identity}.jsonl").open() as handle:
             self.assertEqual(json.loads(handle.readline())["payload"]["proxy"], "http://fixture.invalid")
         self.assertEqual(self.tmux(spec, "display-message", "-p", "#{session_attached}").stdout.strip(), "1")
+        self.assertEqual(self.tmux(spec, "show-options", "-p", "-v", "-t", spec["top"], "cursor-style").stdout.strip(), "block")
+        if terminal == "tmux-256color":
+            capabilities = self.tmux(spec, "list-clients", "-F", "#{client_termfeatures}").stdout.strip().split(",")
+            self.assertIn("sync", capabilities)
+            output.flush()
+            terminal_bytes = (self.base / "terminal-output.log").read_bytes()
+            self.assertIn(b"\x1b[?2026h", terminal_bytes)
+            self.assertIn(b"\x1b[?2026l", terminal_bytes)
         self.send(spec, "quit")
         self.wait_for(lambda: not Path(spec["runtime"]).exists())
 

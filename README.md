@@ -103,6 +103,8 @@ codex plugin add codex-hud@codex-hud
 
 插件使用独立 tmux 会话运行官方 CLI，为本次调用加入 `--no-daemon` 和私有临时诊断目录。CLI 配置文件中的模型、账号和权限策略继续生效；不会修改用户的 tmux 配置。每个 HUD 按其自己的诊断事件和日志归属绑定线程，包括 `/new` 尚未发消息的阶段。
 
+v0.4.2 为 tmux 外层终端声明同步绘制能力，并为 CLI 面板指定常亮光标，减少嵌套 tmux 时光标隐藏/显示被拆开呈现造成的闪烁。已有面板刷新后常亮样式立即生效；已连接客户端的终端能力由 tmux 在连接时读取，同步绘制声明在下次正常进入时生效。
+
 `exec`、`review`、`debug`、`login`、`plugin` 等非交互命令，帮助/版本查询、管道或重定向输出、远程会话继续使用原 CLI。未知参数语法会保守透传。HUD 不改变审批或网络政策。
 
 这是一份可通过 Codex 插件管理器安装的 skill 插件，加上一次性的本地启动集成。Codex 的[原生状态栏](https://learn.chatgpt.com/docs/cli/slash-commands#configure-footer-items-with-statusline)通过 `/statusline` 配置内建字段；本插件的 agent 和分流面板由 tmux 渲染，未替换或修改官方 CLI。
