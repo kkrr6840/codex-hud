@@ -44,7 +44,7 @@ jobs:
         shell: pwsh
         run: |
           $cliPrefix = Join-Path $env:RUNNER_TEMP 'codex-hud-official-npm'
-          npm install --prefix $cliPrefix --no-audit --no-fund --ignore-scripts @openai/codex@0.162.1
+          npm install --global --prefix $cliPrefix --no-audit --no-fund --ignore-scripts @openai/codex@0.162.1
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           "CODEX_HUD_OFFICIAL_NPM_ROOT=$cliPrefix" >> $env:GITHUB_ENV
       - name: Verify portable Python behavior and Windows installation

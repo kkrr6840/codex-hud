@@ -610,7 +610,9 @@ class FakeCodex {
         script.write_text("""
 const {pty}=require(process.argv[2]).loadDependencies();
 let output='',sent=false;
-const child=pty.spawn(process.argv[3],['/d','/v:off','/s','/c',process.argv[4]],{cols:90,rows:28,cwd:process.cwd(),env:process.env});
+// cmd /c uses shell quoting, not CommandLineToArgvW escaping. node-pty's
+// documented Windows string form keeps this command line verbatim.
+const child=pty.spawn(process.argv[3],'/d /v:off /s /c '+process.argv[4],{cols:90,rows:28,cwd:process.cwd(),env:process.env});
 const timer=setTimeout(()=>{try{child.kill();}catch{}process.exit(98);},15000);
 child.onData(data=>{output+=data;if(!sent&&output.includes('HUD_TTY_OK')){sent=true;child.write('quit\\r');}});
 child.onExit(event=>{clearTimeout(timer);try{child.kill();}catch{}process.stdout.write(JSON.stringify({code:event.exitCode,output}));});
