@@ -45,7 +45,9 @@ async function stopFixture(outer, hasExited, runtime, originalError) {
       const deadline = Date.now() + 2000;
       while (!hasExited() && Date.now() < deadline) await wait(25);
     }
-    if (!hasExited()) { try { outer.kill(); } catch {} }
+    // ConPTY's normal exit leaves the wrapper's output worker referenced;
+    // public kill() releases it after the real onExit/exit-code assertions.
+    if (!hasExited() || process.platform === 'win32') { try { outer.kill(); } catch {} }
     for (const pid of [owned.pid, owned.bridge_pid, outer.pid]) {
       if (Number.isInteger(pid) && pid > 0 && pid !== process.pid && hud.processAlive(pid)) { try { process.kill(pid); } catch (error) { if (error.code !== 'ESRCH') throw error; } }
     }
