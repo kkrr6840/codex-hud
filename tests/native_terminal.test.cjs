@@ -448,8 +448,8 @@ process.stdin.on('data',data=>{const text=data.replace(/\\x1b(?:\\[[0-?]*[ -/]*[
     ...(process.platform === 'win32' ? {} : { encoding: 'utf8' }), conptyInheritCursor: false
   });
   const terminal = new Terminal({ cols: 90, rows: 28, allowProposedApi: true });
-  let exited = false, exitCode, output = '', replies = '', failure;
-  outer.onData(data => { output += data; terminal.write(data); });
+  let exited = false, exitCode, output = '', replies = '', failure, lastOutput = Date.now();
+  outer.onData(data => { lastOutput = Date.now(); output += data; terminal.write(data); });
   terminal.onData(data => { replies += data; outer.write(data); });
   outer.onExit(event => { exited = true; exitCode = event.exitCode; });
   const visible = () => Array.from({ length: terminal.rows }, (_, y) => terminal.buffer.active.getLine(terminal.buffer.active.viewportY + y)?.translateToString(true) || '').join('\n');
@@ -467,6 +467,9 @@ process.stdin.on('data',data=>{const text=data.replace(/\\x1b(?:\\[[0-?]*[ -/]*[
     const snapshot = JSON.parse(fs.readFileSync(path.join(runtime, 'snapshot.json'), 'utf8'));
     assert.equal(snapshot.root.id, root); assert.equal(snapshot.agents[0].id, child);
     assert.equal(snapshot.agents[0].name, nickname); assert.ok(runner.bridge_pid > 0);
+    // The real bridge can resize the CLI after its first visible composer.
+    // Wait for that redraw just as in the synthetic bridge lifecycle test.
+    await until(() => visible().includes('› Ask Codex') && Date.now() - lastOutput >= 100, 'real bridge resized composer settled');
     outer.write(`${CSI}B`); await until(selected, 'plain Down selected actual correlated agent');
     outer.write('\r'); await until(() => visible().includes(answer), 'real Python details returned actual child answer');
     assert.deepEqual(fs.readFileSync(childLog), beforeLog, 'viewing details never changes or resumes the child session');
