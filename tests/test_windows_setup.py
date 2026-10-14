@@ -393,6 +393,9 @@ class NativeDependencyTest(unittest.TestCase):
                 self.assertEqual(install_call.args[0][:2], [str(node), str(cli)])
                 self.assertIn(str(prefix), install_call.args[0])
                 self.assertIn("--include=optional", install_call.args[0])
+                self.assertIn("--global=false", install_call.args[0])
+                self.assertIn("--workspaces=false", install_call.args[0])
+                self.assertEqual(install_call.kwargs["cwd"], str(prefix))
                 self.assertNotIn("shell", install_call.kwargs)
                 verify = run.call_args.args[0]
                 self.assertIn("createRequire", verify[2])
@@ -565,10 +568,13 @@ class FakeCodex {
         cmd_before, ps1_before = npm_cmd.read_bytes(), npm_ps1.read_bytes()
         shim_bin = self.base / ".local/bin"
         self.wrapper = shim_bin / "codex.cmd"
-        env = dict(self.env, CODEX_HOME=str(self.base / "empty-codex-home"),
+        # Registry installation inherits the runner's real proxy settings. The
+        # synthetic proxy only belongs to the later CLI/profile passthrough.
+        env = dict(os.environ, CODEX_HUD_CONFIG_HOME=self.env["CODEX_HUD_CONFIG_HOME"],
+                   CODEX_HOME=str(self.base / "empty-codex-home"),
                    CODEX_HUD_REAL_CLI=str(real), CODEX_HUD_BIN_DIR=str(shim_bin),
                    CODEX_HUD_SHELL_RC=str(profile),
-                   PATH=str(npm_prefix) + os.pathsep + self.env["PATH"], HTTP_PROXY="before-profile")
+                   PATH=str(npm_prefix) + os.pathsep + self.env["PATH"])
         with patch.dict(os.environ, env):
             with redirect_stdout(io.StringIO()):
                 self.assertEqual(setup.configure(["--enable"]), 0)
@@ -593,7 +599,7 @@ class FakeCodex {
             for powershell in dict.fromkeys(path for path in powershells if path):
                 with self.subTest(powershell=powershell):
                     result = subprocess.run([powershell, "-NoLogo", "-NoProfile", "-File", str(runner)],
-                                            env=env, capture_output=True, encoding="utf-8", timeout=30)
+                                            env=dict(env, HTTP_PROXY="before-profile"), capture_output=True, encoding="utf-8", timeout=30)
                     self.assert_forwarded(result, ["--version"])
             with redirect_stdout(io.StringIO()):
                 self.assertEqual(setup.configure(["--uninstall"]), 0)

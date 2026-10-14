@@ -213,6 +213,7 @@ class SourcesTest(unittest.TestCase):
         row = {"thread_id": "a", "item_json": json.dumps({"command": "python3 /path/codex-x-codex/scripts/offload.py status"})}
         self.assertIsNone(offload_job(row, "model"))
 
+    @unittest.skipIf(os.name == "nt", "lsof ownership fallback is macOS/Linux only; Windows uses diagnostics")
     def test_rebind_on_cli_new_clears_previous_agents_and_usage(self):
         a = self.thread("root-A")
         b = self.thread("root-B")
@@ -284,6 +285,7 @@ class SourcesTest(unittest.TestCase):
         self.assertEqual(jobs[0]["status"], "completed")
         self.assertEqual(jobs[0]["usage"]["input_tokens"], 789)
 
+    @unittest.skipIf(os.name == "nt", "lsof ownership fallback is macOS/Linux only; Windows uses diagnostics")
     def test_failed_ownership_check_clears_previous_session(self):
         a = self.thread("root-A")
         collector = Collector(home=self.home, runner=123)

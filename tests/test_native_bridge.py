@@ -105,20 +105,28 @@ class NativeBridgeTest(unittest.TestCase):
                                      stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                      text=True, encoding="utf-8", env={**os.environ, "PYTHONUTF8": "1"})
         incoming = queue.Queue()
+        errors, seen = [], []
         def reader():
             for line in self.proc.stdout:
                 incoming.put(json.loads(line))
+        def stderr():
+            for line in self.proc.stderr:
+                errors.append(line)
         threading.Thread(target=reader, daemon=True).start()
+        threading.Thread(target=stderr, daemon=True).start()
         def receive(predicate):
             deadline = time.monotonic()+8
             while time.monotonic() < deadline:
                 try:
                     value = incoming.get(timeout=.2)
                 except queue.Empty:
+                    if self.proc.poll() is not None:
+                        self.fail(f"bridge exited {self.proc.returncode}: {''.join(errors)}")
                     continue
+                seen.append((value.get("type"), value.get("snapshot", {}).get("root", {}).get("id")))
                 if predicate(value):
                     return value
-            self.fail("bridge did not emit expected packet")
+            self.fail(f"bridge did not emit expected packet; seen={seen}; stderr={''.join(errors)}")
         def send(value):
             self.proc.stdin.write(json.dumps(value)+"\n")
             self.proc.stdin.flush()
@@ -133,7 +141,7 @@ class NativeBridgeTest(unittest.TestCase):
         send({"type": "detail", "request_id": 2, "root": self.root, "key": ["native", self.child]})
         self.assertIn("error", receive(lambda x: x.get("request_id") == 2))
         self.proc.stdin.close()
-        self.assertEqual(self.proc.wait(timeout=5), 0, self.proc.stderr.read())
+        self.assertEqual(self.proc.wait(timeout=5), 0, "".join(errors))
 
 
 if __name__ == "__main__":

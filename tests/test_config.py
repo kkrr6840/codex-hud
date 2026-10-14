@@ -2,6 +2,7 @@ from copy import deepcopy
 import json
 import os
 from pathlib import Path
+from types import SimpleNamespace
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -36,7 +37,8 @@ class ConfigTest(unittest.TestCase):
         self.assertFalse(cfg["show"]["tools"])
         save({"show": {"cache": True}})
         self.assertTrue(load()[0]["show"]["cache"])
-        self.assertEqual(path().stat().st_mode & 0o777, 0o600)
+        if os.name != "nt":  # NTFS access is inherited from the private installer directory.
+            self.assertEqual(path().stat().st_mode & 0o777, 0o600)
 
     def test_override_wins_and_is_never_written(self):
         override = path().with_name("override.json")
@@ -106,7 +108,8 @@ class ConfigTest(unittest.TestCase):
             def refresh(self): pass
         screen = Screen()
         snapshot = self.snapshot()
-        with patch("codex_hud.display.curses.color_pair", return_value=0):
+        renderer = SimpleNamespace(color_pair=lambda _: 0, A_BOLD=0, A_REVERSE=0, error=Exception)
+        with patch("codex_hud.display.curses", renderer):
             paint(screen, snapshot, 999, expanded=True)
         self.assertIn("缓存", "".join(screen.writes))
 

@@ -54,5 +54,6 @@ jobs:
           '@ | python -
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Verify real ConPTY terminal and JSONL bridge without model requests
+        if: ${{ !cancelled() }}
         shell: pwsh
         run: node --test tests/native_terminal.test.cjs

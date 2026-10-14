@@ -375,7 +375,7 @@ def install_native_dependencies(directory, root=None):
         supported = False
     if not supported:
         raise RuntimeError("原生 Windows HUD 需要 Node.js 20 或更新版本")
-    prefix = Path(directory) / "native_node"
+    prefix = (Path(directory) / "native_node").absolute()
     prefix.mkdir(parents=True, exist_ok=True)
     manifest = source.read_bytes()
     unchanged = (prefix / "package.json").is_file() and (prefix / "package.json").read_bytes() == manifest
@@ -394,7 +394,11 @@ def install_native_dependencies(directory, root=None):
     command = [node, str(npm_cli)] if npm_cli.is_file() else [npm]
     if Path(npm).suffix.lower() == ".cmd" and not npm_cli.is_file():
         raise RuntimeError("找不到 npm 的 npm-cli.js；请安装标准 Node.js LTS 发行版")
-    result = subprocess.run([*command, "install", "--prefix", str(prefix), "--include=optional", "--no-audit", "--no-fund"], timeout=300)
+    # npm must never discover the caller's project/workspace or run globally.
+    # Keep cwd and explicit prefix aligned, including paths with spaces/Unicode.
+    result = subprocess.run([*command, "--prefix", str(prefix), "--global=false", "--workspaces=false",
+                             "install", "--include=optional", "--no-audit", "--no-fund"],
+                            cwd=str(prefix), timeout=300)
     if result.returncode:
         raise RuntimeError("原生终端依赖安装失败；现有 Codex 入口和 PowerShell profile 未修改")
     _verify_native_dependencies(node, prefix)
