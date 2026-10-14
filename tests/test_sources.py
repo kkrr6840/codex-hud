@@ -216,6 +216,18 @@ class SourcesTest(unittest.TestCase):
         row = {"thread_id": "a", "item_json": json.dumps({"command": "python3 /path/codex-x-codex/scripts/offload.py status"})}
         self.assertIsNone(offload_job(row, "model"))
 
+    def test_offload_help_in_compound_commands_is_not_a_model_job(self):
+        for helpflag in ("--help", "-h"):
+            command = "python3 - <<'PY'\nprint('prepare')\nPY\npython3 /path/codex-x-codex/scripts/offload.py run " + helpflag
+            row = {"thread_id": "root", "item_json": json.dumps({"id": "help", "command": command, "status": "completed", "exitCode": 0})}
+            self.assertIsNone(offload_job(row, "relay-model"))
+        command = "python3 - <<'PY'\nprint('prepare')\nPY\npython3 /path/codex-x-codex/scripts/offload.py run --mode workspace-write --model worker-model --task-file /tmp/task.txt"
+        row["item_json"] = json.dumps({"id": "real", "command": command, "status": "inProgress"})
+        job = offload_job(row, "relay-model")
+        self.assertEqual(job["status"], "running")
+        self.assertEqual(job["task"], "代码修改子任务")
+        self.assertEqual(job["model"], "worker-model")
+
     @unittest.skipIf(os.name == "nt", "lsof ownership fallback is macOS/Linux only; Windows uses diagnostics")
     def test_rebind_on_cli_new_clears_previous_agents_and_usage(self):
         a = self.thread("root-A")

@@ -434,12 +434,20 @@ def response_json(output):
 def offload_job(row, configured_model, launched_at=None):
     item = json.loads(row["item_json"])
     command = command_text(item)
-    if not OFFLOAD.search(command):
+    args = None
+    for match in OFFLOAD.finditer(command):
+        # Compound commands may prepare a task before the actual invocation.
+        # Help is CLI inspection, never a model job or missing usage record.
+        invocation = match.group().lstrip("\n;&| ") + command[match.end():].split("\n", 1)[0]
+        try:
+            candidate = shlex.split(invocation)
+        except ValueError:
+            continue
+        if "--help" not in candidate and "-h" not in candidate:
+            args = candidate
+            break
+    if args is None:
         return None
-    try:
-        args = shlex.split(command.split("\n", 1)[0])
-    except ValueError:
-        args = []
     def option(name, fallback):
         try:
             return args[args.index(name) + 1]
@@ -457,7 +465,7 @@ def offload_job(row, configured_model, launched_at=None):
     elif raw == "failed" or item.get("exitCode") not in (None, 0):
         status = "failed"
     return {"id": item.get("id"), "process_id": item.get("processId"), "owner": row["thread_id"], "status": status,
-            "task": option("--task", "只读子任务"), "started": started, "ended": ended,
+            "task": option("--task", "代码修改子任务" if (response or {}).get("mode", option("--mode", "read-only")) == "workspace-write" else "只读子任务"), "started": started, "ended": ended,
             "model": (response or {}).get("model") or option("--model", configured_model),
             "duration": (response or {}).get("duration_seconds"),
             "usage": (response or {}).get("usage"), "worker_id": (response or {}).get("thread_id"),
