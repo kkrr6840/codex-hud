@@ -487,6 +487,8 @@ class Collector:
         self.tasks = {}
         self.diagnostic = Diagnostic(diagnostic) if diagnostic else None
         self.extra_cache = {}
+        self.skill_turn = None
+        self.skill_reads = []
 
     def reader(self, path):
         path = str(path)
@@ -575,6 +577,11 @@ class Collector:
                         turn = history.execute("SELECT * FROM thread_turns WHERE thread_id=? ORDER BY rollout_ordinal DESC LIMIT 1", (owner,)).fetchone()
                         if turn:
                             turns[owner] = dict(turn)
+                        if owner == self.root_id:
+                            current_turn = dict(turn) if turn else {}
+                            if current_turn.get("turn_id") != self.skill_turn:
+                                self.skill_turn = current_turn.get("turn_id")
+                                self.skill_reads = []
                         watermark = self.watermarks.get(owner, -1)
                         for row in history.execute("SELECT * FROM thread_items WHERE thread_id=? AND item_type IN ('collabAgentToolCall','commandExecution') AND (rollout_ordinal>? OR updated_at_ordinal>?) ORDER BY rollout_ordinal", (owner, watermark, watermark)):
                             self.watermarks[owner] = max(self.watermarks.get(owner, -1), row["rollout_ordinal"], row["updated_at_ordinal"])
@@ -584,10 +591,19 @@ class Collector:
                                     for receiver in item.get("receiverThreadIds") or []:
                                         self.tasks[receiver] = item["prompt"]
                             else:
+                                if owner == self.root_id and "SKILL.md" in row["item_json"]:
+                                    record = dict(row)
+                                    same_turn = record.get("turn_id") == self.skill_turn if record.get("turn_id") else bool(turn and record.get("created_at_ms", 0) >= (turn["started_at"] or 0)*1000)
+                                    if same_turn:
+                                        from .skills import read_skills
+                                        for name in read_skills(json.loads(row["item_json"])):
+                                            if name not in self.skill_reads:
+                                                self.skill_reads.append(name)
                                 job = offload_job(dict(row), offload["model"], self.launched_at)
                                 if job:
                                     self.jobs[(owner, job["id"])] = job
                 if self.root_id in turns:
+                    root["skills"] = list(self.skill_reads)
                     root["status"] = turn_state(turns[self.root_id], True, self.launched_at)
                     root["started"] = turns[self.root_id].get("started_at")
                 elif root.get("status") == "completed":

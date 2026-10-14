@@ -184,8 +184,8 @@ class VirtualScreen {
   write(data, afterParsed = () => {}) {
     this.pendingWrites++;
     this.terminal.write(data, () => {
-      afterParsed();
       this.pendingWrites--;
+      afterParsed();
       // A hide/show sequence may straddle PTY data events. Never paint the
       // intermediate screen in a DEC synchronized-output transaction.
       if (!this.pendingWrites && !this.terminal.modes.synchronizedOutputMode) this.onParsed();
@@ -336,9 +336,9 @@ class HudController {
       if (token.name === 'down') this.detailOffset = Math.min(Math.max(0, this.wrappedDetails(this.detailWidth).length - this.detailPageRows), this.detailOffset + 1);
       else if (token.name === 'up') this.detailOffset = Math.max(0, this.detailOffset - 1);
     } else if (this.mode === 'config') {
-      if (token.name === 'down') this.configIndex = Math.min(2, this.configIndex + 1);
+      if (token.name === 'down') this.configIndex = Math.min(3, this.configIndex + 1);
       else if (token.name === 'up') this.configIndex = Math.max(0, this.configIndex - 1);
-      else if (token.name === 'enter') this.send({ type: 'config', request_id: ++this.requestId, changes: { preset: ['minimal', 'standard', 'full'][this.configIndex] } });
+      else if (token.name === 'enter') this.send({ type: 'config', request_id: ++this.requestId, changes: { preset: ['minimal', 'standard', 'full', 'focus'][this.configIndex] } });
     }
     return { consumed: true };
   }
@@ -383,7 +383,7 @@ class HudController {
   overlayLines(height, width) {
     const colors = { ...DEFAULT_COLORS, ...this.snapshot.display?.colors };
     if (this.mode === 'config') {
-      const rows = [' Codex HUD · configuration', '', ...['minimal', 'standard', 'full'].map((name, i) => `${this.configIndex === i ? ' ›' : '  '} ${name}`), '', this.configError, ' ↑↓ select · Enter apply · Esc back'];
+      const rows = [' Codex HUD · configuration', '', ...['minimal', 'standard', 'full', 'focus'].map((name, i) => `${this.configIndex === i ? ' ›' : '  '} ${name}`), '', this.configError, ' ↑↓ select · Enter apply · Esc back'];
       return rows.map((text, i) => styledRow({ spans: [[text, i === 0 ? 'model' : 'text']] }, width, colors, i === this.configIndex + 2));
     }
     this.detailWidth = width;

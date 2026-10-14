@@ -191,9 +191,21 @@ class View:
             self.put("tokens", spans)
         cached, inputs = usage.get("cached_input_tokens"), usage.get("input_tokens")
         if self.show["cache"] and type(cached) is int and type(inputs) is int and 0 <= cached <= inputs and inputs > 0:
-            self.put("cache", [(" " + self.tr("缓存", "Cache", "快取") + " ", "muted"), *self.bar(cached/inputs, "model"), (f"{cached/inputs:.0%}", "model"), (f"  {number(cached)} / {number(inputs)} tokens", "muted")])
+            spans = [(" " + self.tr("缓存", "Cache", "快取") + " ", "muted")]
+            if self.c["cache_style"] == "bar":
+                spans += [*self.bar(cached/inputs, "model"), (f"{cached/inputs:.0%}", "model"), (f"  {number(cached)} / {number(inputs)} tokens", "muted")]
+            else:
+                spans += [(f"{cached/inputs:.0%}", "model")]
+            self.put("cache", spans)
 
     def activity(self):
+        skills = self.root.get("skills") or []
+        if self.show["skills"] and skills:
+            limit = self.c["skills_limit"] or len(skills)
+            names = " · ".join(clip(clean(name), 32) for name in skills[:limit])
+            if len(skills) > limit:
+                names += f" +{len(skills)-limit}"
+            self.put("skills", [(" Skills ", "model"), (self.tr("本轮已读 ", "read this turn ", "本輪已讀 "), "muted"), (names, "agent")])
         tools = self.root.get("tools") or []
         if self.show["tools"] and tools:
             active = [t for t in tools if t["status"] == "running"]

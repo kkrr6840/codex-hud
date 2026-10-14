@@ -111,11 +111,10 @@ def init_colors(config=None):
         curses.init_pair(index, color, -1)
 
 
-def paint(screen, snapshot, scroll=0, expanded=False, selected_key=None):
+def paint(screen, snapshot, scroll=0, expanded=False, selected_key=None, frame_cache=None):
     height, width = screen.getmaxyx()
     width = min(width, (snapshot.get("display") or {}).get("max_width") or width)
     rows = render_rows(snapshot, width)
-    screen.erase()
     # Expanded view scrolls every row; normal view preserves configured order.
     pinned_count = 0
     if not expanded:
@@ -149,6 +148,11 @@ def paint(screen, snapshot, scroll=0, expanded=False, selected_key=None):
         else:
             hint = " ↑↓ 滚动 · Esc 返回 CLI" if expanded else f" … 另有 {remaining} 行 · Ctrl-b H 展开"
         visible += [Row([(hint, "dim")])]
+    palette = tuple(sorted(((snapshot.get("display") or {}).get("colors") or {}).items()))
+    signature = (height, width, palette, selected_key, tuple((tuple(row.spans), row.key) for row in visible[:height]))
+    if frame_cache is not None and frame_cache.get("signature") == signature:
+        return scroll
+    screen.erase()
     for y, row in enumerate(visible[:height]):
         x = 0
         for text, kind in row.spans:
@@ -168,6 +172,8 @@ def paint(screen, snapshot, scroll=0, expanded=False, selected_key=None):
             if rendered != text:
                 break
     screen.refresh()
+    if frame_cache is not None:
+        frame_cache["signature"] = signature
     return scroll
 
 

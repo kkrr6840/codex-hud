@@ -12,6 +12,28 @@ from codex_hud.sources import Collector, Diagnostic, Rollout, offload_job, turn_
 
 
 class SourcesTest(unittest.TestCase):
+    def test_skill_reads_are_current_turn_only_and_never_include_children_or_other_sessions(self):
+        self.thread("root")
+        self.thread("child", "root")
+        self.thread("other")
+        self.history.execute("ALTER TABLE thread_items ADD COLUMN turn_id TEXT")
+        def read(owner, identity, skill, ordinal, turn="turn"):
+            item = {"type": "commandExecution", "id": identity, "status": "completed", "exitCode": 0,
+                    "commandActions": [{"type": "read", "path": f"/skills/{skill}/SKILL.md"}], "aggregatedOutput": f"---\nname: {skill}\n---\n# Instructions\n"}
+            self.history.execute("INSERT INTO thread_items(thread_id,item_id,item_type,item_json,rollout_ordinal,updated_at_ordinal,created_at_ms,turn_id) VALUES(?,?,?,?,?,?,?,?)", (owner,identity,"commandExecution",json.dumps(item),ordinal,ordinal,100000,turn))
+            self.history.commit()
+        read("root", "a", "hud", 2)
+        read("child", "b", "child-only", 3)
+        read("other", "c", "other-only", 4)
+        collector = Collector(self.home, root_id="root")
+        self.assertEqual(collector.collect()["root"]["skills"], ["hud"])
+        self.history.execute("INSERT INTO thread_turns VALUES(?,?,?,?,?,?,?)", ("root", "new-turn", 10, "inProgress", 200, None, None))
+        self.history.commit()
+        self.assertEqual(collector.collect()["root"]["skills"], [])
+        read("root", "d", "openai-docs", 11, "new-turn")
+        self.assertEqual(collector.collect()["root"]["skills"], ["openai-docs"])
+        self.assertEqual(Collector(self.home, root_id="root").collect()["root"]["skills"], ["openai-docs"])
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.home = Path(self.temp.name)

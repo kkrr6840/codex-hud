@@ -14,21 +14,22 @@ ELEMENTS = {
     "session_name": "会话名称", "version": "CLI 版本", "context": "上下文",
     "quota_5h": "5 小时额度", "quota_weekly": "每周额度", "quota_other": "其他额度窗口",
     "tokens": "Token 明细", "cache": "缓存命中率", "tools": "工具活动",
-    "mcp": "MCP 活动", "agents": "子 agent", "todos": "计划进度",
+    "mcp": "MCP 活动", "skills": "本轮已读 Skills", "agents": "子 agent", "todos": "计划进度",
     "duration": "会话时长", "session_start": "开始时间", "last_response": "最近响应",
     "compactions": "压缩次数", "environment": "配置数量", "memory": "系统内存",
     "offload": "Codex 分流", "custom": "自定义文字",
     "added_dirs": "额外工作目录", "auth_plan": "订阅计划",
 }
-SECTIONS = ["header", "context", "quota", "tokens", "cache", "tools", "mcp", "agents", "todos", "session", "environment", "memory", "offload", "custom"]
+SECTIONS = ["header", "context", "quota", "tokens", "cache", "skills", "tools", "mcp", "agents", "todos", "session", "environment", "memory", "offload", "custom"]
 DEFAULT = {
     "language": "zh-Hans", "layout": "expanded", "separators": True,
     "height": 11, "max_width": 0, "path_levels": 2,
-    "show": {key: key in {"model", "effort", "status", "project", "git", "context", "quota_5h", "quota_weekly", "quota_other", "tokens", "cache", "tools", "mcp", "agents", "todos", "offload"} for key in ELEMENTS},
+    "show": {key: key in {"model", "effort", "status", "project", "git", "context", "quota_5h", "quota_weekly", "quota_other", "tokens", "cache", "skills", "tools", "mcp", "agents", "todos", "offload"} for key in ELEMENTS},
     "order": SECTIONS, "header_order": ["model", "status", "project", "git", "provider", "session_name", "version"],
     "merge_groups": [["context", "quota"]], "right_align": [],
     "context_value": "both", "context_bar": True, "context_window": None,
     "quota_style": "bar", "quota_value": "remaining", "reset_format": "both",
+    "cache_style": "bar", "skills_limit": 3,
     "reset_label": True, "clock_24h": True, "clock_seconds": False,
     "usage_pace": False, "usage_threshold": 0, "weekly_threshold": 0,
     "warning_percent": 70, "critical_percent": 90,
@@ -43,7 +44,7 @@ UNAVAILABLE = {
     "cost / daily_cost / weekly_cost": "Codex 会话未提供实际费用，订阅额度不等于美元费用；不按 token 猜账单。",
     "speed": "当前日志没有可靠的单次 API 耗时；整轮时间含工具与等待，不能冒充生成 tok/s。",
     "prompt_cache_expiry": "Codex 未提供缓存到期时间；支持真实缓存 token 和命中率。",
-    "active_skills": "Codex 没有 Claude Skill 工具事件；已配置技能数量不代表本轮调用次数。",
+    "active_skills": "显示本轮成功读取的 SKILL.md 名称，不代表持续运行、已安装数量或全部可用技能；未被记录的读取无法显示。",
     "advisor / output_style / auth_user": "Claude 专有字段或当前日志未提供；不读取登录凭据来补齐。",
     "external_usage / extra_command": "不复用 Claude 账号额度或执行外部状态命令；额度来自当前 Codex 会话。",
     "jj": "本版实现 Git；Jujutsu 的工作副本与冲突状态未实现。",
@@ -77,13 +78,13 @@ def read(pathname):
 
 def validate(cfg):
     enums = {"language": ["zh-Hans", "zh-Hant", "en"], "layout": ["expanded", "compact"],
-             "context_value": ["percent", "tokens", "remaining", "both"], "quota_style": ["bar", "text", "compact"],
+             "context_value": ["percent", "tokens", "remaining", "both"], "quota_style": ["bar", "text", "compact"], "cache_style": ["bar", "text"],
              "quota_value": ["used", "remaining"], "reset_format": ["relative", "absolute", "both", "elapsed", "elapsed_absolute"],
              "model_format": ["full", "short"], "effort_format": ["text", "symbol", "both"], "custom_position": ["first", "last"]}
     for key, values in enums.items():
         if cfg[key] not in values:
             raise ValueError(f"{key} 需为 {', '.join(values)}")
-    for key, lo, hi in [("height", 1, 30), ("max_width", 0, 500), ("path_levels", 0, 10), ("tools_limit", 0, 30), ("agents_limit", 0, 30), ("tool_name_length", 0, 120), ("warning_percent", 0, 100), ("critical_percent", 0, 100), ("usage_threshold", 0, 100), ("weekly_threshold", 0, 100)]:
+    for key, lo, hi in [("height", 1, 30), ("max_width", 0, 500), ("path_levels", 0, 10), ("tools_limit", 0, 30), ("agents_limit", 0, 30), ("skills_limit", 0, 30), ("tool_name_length", 0, 120), ("warning_percent", 0, 100), ("critical_percent", 0, 100), ("usage_threshold", 0, 100), ("weekly_threshold", 0, 100)]:
         if type(cfg[key]) is not int or not lo <= cfg[key] <= hi:
             raise ValueError(f"{key} 需为 {lo}–{hi} 的整数")
     if cfg["warning_percent"] > cfg["critical_percent"]:
@@ -143,8 +144,13 @@ def save(changes):
 
 
 def preset(name):
+    if name == "focus":
+        visible = {"status", "git", "context", "quota_5h", "quota_weekly", "quota_other", "tokens", "cache", "skills", "tools", "mcp", "agents", "todos", "offload"}
+        return {"show": {key: key in visible for key in ELEMENTS}, "layout": "compact", "cache_style": "text",
+                "order": ["header", "skills", "context", "quota", "tokens", "cache", "tools", "mcp", "agents", "todos", "offload", "session", "environment", "memory", "custom"],
+                "merge_groups": [["context", "quota"], ["tokens", "cache"], ["header", "skills"]]}
     minimum = {"model", "project", "git", "context", "quota_5h", "quota_weekly"}
-    standard = minimum | {"effort", "status", "cache", "tools", "mcp", "agents", "todos", "offload"}
+    standard = minimum | {"effort", "status", "cache", "skills", "tools", "mcp", "agents", "todos", "offload"}
     visible = minimum if name == "minimal" else standard if name == "standard" else set(ELEMENTS)
     return {"show": {key: key in visible for key in ELEMENTS}, "layout": "compact" if name == "minimal" else "expanded"}
 
@@ -153,7 +159,7 @@ def configure(argv):
     parser = argparse.ArgumentParser(prog="codex-hud config", description="显示配置；保存后所有 HUD 下次刷新生效")
     parser.add_argument("--show", help="显示项目，逗号分隔")
     parser.add_argument("--hide", help="隐藏项目，逗号分隔")
-    parser.add_argument("--preset", choices=["minimal", "standard", "full"])
+    parser.add_argument("--preset", choices=["minimal", "standard", "full", "focus"])
     parser.add_argument("--layout", choices=["expanded", "compact"])
     parser.add_argument("--language", choices=["zh-Hans", "zh-Hant", "en"])
     parser.add_argument("--set", action="append", default=[], metavar="KEY=JSON", help="例如 --set 'git.ahead_behind=true'")

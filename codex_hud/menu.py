@@ -30,14 +30,14 @@ def run():
                     except curses.error:
                         pass
             line(0, " Codex HUD · Display settings" if en else " Codex HUD · 显示设置", curses.A_BOLD)
-            line(1, " ↑↓ select · Space toggle · 1/2/3 presets · L layout · G language" if en else " ↑↓ 选择 · 空格 开关 · 1/2/3 预设 · L 布局 · G 语言")
+            line(1, " ↑↓ select · Space toggle · 1/2/3/4 presets · L layout · G language" if en else " ↑↓ 选择 · 空格 开关 · 1/2/3/4 预设 · L 布局 · G 语言")
             line(2, f" {cfg['layout']} · {cfg['language']} · Esc/q close · saved live" if en else f" {cfg['layout']} · {cfg['language']} · Esc/q 关闭 · 修改立即保存生效")
             room = max(1, height-5)
             offset = max(0, selected-room+1)
             for i, key in enumerate(keys[offset:offset+room], offset):
                 marker = "[✓]" if cfg["show"][key] else "[ ]"
                 line(4+i-offset, f" {marker} {key if en else ELEMENTS[key]}", curses.A_REVERSE if i == selected else 0)
-            line(height-1, " " + (error or notice or ("1 minimal · 2 standard · 3 full" if en else "1 精简 · 2 标准 · 3 完整；高级选项通过 hud skill 修改")))
+            line(height-1, " " + (error or notice or ("1 minimal · 2 standard · 3 full · 4 focus" if en else "1 精简 · 2 标准 · 3 完整 · 4 专注")))
             screen.refresh()
             key = screen.getch()
             if key in (27, ord("q")):
@@ -50,8 +50,8 @@ def run():
                 patch = None
                 if key in (ord(" "), 10, 13):
                     patch = {"show": {keys[selected]: not cfg["show"][keys[selected]]}}
-                elif key in (ord("1"), ord("2"), ord("3")):
-                    patch = preset({ord("1"): "minimal", ord("2"): "standard", ord("3"): "full"}[key])
+                elif key in (ord("1"), ord("2"), ord("3"), ord("4")):
+                    patch = preset({ord("1"): "minimal", ord("2"): "standard", ord("3"): "full", ord("4"): "focus"}[key])
                 elif key in (ord("l"), ord("L")):
                     patch = {"layout": "compact" if cfg["layout"] == "expanded" else "expanded"}
                 elif key in (ord("g"), ord("G")):

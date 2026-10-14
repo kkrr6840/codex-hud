@@ -232,6 +232,27 @@ test('VT synchronized frames spanning data events paint only the complete frame'
   } finally { screen.dispose(); }
 });
 
+test('parsed callbacks observe an empty composer only after the write queue drains', async () => {
+  const screen = new hud.VirtualScreen(Terminal, 80, 24);
+  const observed = [];
+  try {
+    screen.write(prompt, () => observed.push(screen.emptyComposer()));
+    screen.write(prompt, () => observed.push(screen.emptyComposer()));
+    await until(() => observed.length === 2, 'queued frames parsed');
+    assert.deepEqual(observed, [false, true]);
+  } finally { screen.dispose(); }
+});
+
+test('configuration menu exposes the focus preset on native terminals', () => {
+  const requests = [], controller = new hud.HudController(message => requests.push(message));
+  controller.update(packet());
+  controller.input(input('', 'config'), false);
+  for (let i = 0; i < 4; i++) controller.input(input('', 'down'), false);
+  controller.input(input('\r', 'enter'), false);
+  assert.equal(controller.configIndex, 3);
+  assert.equal(requests.at(-1).changes.preset, 'focus');
+});
+
 test('pending draft requires a composer fingerprint change; Working output cannot clear it', async () => {
   const screen = new hud.VirtualScreen(Terminal, 80, 24);
   const guard = new hud.ComposerGuard(screen);
@@ -437,7 +458,7 @@ diagnostic.write_text(f'{stamp} INFO thread_spawn{{thread_id={root}}}:session_in
   const fakeCli = path.join(work, '官方界面替身.cjs');
   fs.writeFileSync(fakeCli, `
 process.stdin.setRawMode(true);process.stdin.setEncoding('utf8');let draft='';
-function draw(){process.stdout.write('\\x1b[?2026h\\x1b[2J\\x1b[10;1H› '+(draft||'\\x1b[2mAsk Codex to do anything\\x1b[0m')+'\\x1b[10;'+(3+draft.length)+'H\\x1b[?25h\\x1b[?2026l');}
+function draw(){process.stdout.write('\\x1b[?2026h\\x1b[2J\\x1b[Hfixture-ready '+process.stdout.columns+'x'+process.stdout.rows+'\\x1b[10;1H› '+(draft||'\\x1b[2mAsk Codex to do anything\\x1b[0m')+'\\x1b[10;'+(3+draft.length)+'H\\x1b[?25h\\x1b[?2026l');}
 draw();process.stdout.on('resize',draw);
 process.stdin.on('data',data=>{const text=data.replace(/\\x1b(?:\\[[0-?]*[ -/]*[@-~]|O[@-~])/g,'');for(const char of text){if(char==='\\r'){if(draft==='/quit')process.exit(0);draft='';}else if(char==='\\x7f')draft=draft.slice(0,-1);else if(char>=' ')draft+=char;}draw();});
 `);
@@ -448,8 +469,8 @@ process.stdin.on('data',data=>{const text=data.replace(/\\x1b(?:\\[[0-?]*[ -/]*[
     ...(process.platform === 'win32' ? {} : { encoding: 'utf8' }), conptyInheritCursor: false
   });
   const terminal = new Terminal({ cols: 90, rows: 28, allowProposedApi: true });
-  let exited = false, exitCode, output = '', replies = '', failure, lastOutput = Date.now();
-  outer.onData(data => { lastOutput = Date.now(); output += data; terminal.write(data); });
+  let exited = false, exitCode, output = '', replies = '', failure, pendingOuterWrites = 0;
+  outer.onData(data => { pendingOuterWrites++; output += data; terminal.write(data, () => { pendingOuterWrites--; }); });
   terminal.onData(data => { replies += data; outer.write(data); });
   outer.onExit(event => { exited = true; exitCode = event.exitCode; });
   const visible = () => Array.from({ length: terminal.rows }, (_, y) => terminal.buffer.active.getLine(terminal.buffer.active.viewportY + y)?.translateToString(true) || '').join('\n');
@@ -467,9 +488,17 @@ process.stdin.on('data',data=>{const text=data.replace(/\\x1b(?:\\[[0-?]*[ -/]*[
     const snapshot = JSON.parse(fs.readFileSync(path.join(runtime, 'snapshot.json'), 'utf8'));
     assert.equal(snapshot.root.id, root); assert.equal(snapshot.agents[0].id, child);
     assert.equal(snapshot.agents[0].name, nickname); assert.ok(runner.bridge_pid > 0);
-    // The real bridge can resize the CLI after its first visible composer.
-    // Wait for that redraw just as in the synthetic bridge lifecycle test.
-    await until(() => visible().includes('› Ask Codex') && Date.now() - lastOutput >= 100, 'real bridge resized composer settled');
+    // A quiet old frame can precede ConPTY's delayed resize event. Require
+    // the child to acknowledge its new height in a fully parsed frame.
+    const outerComposerReady = () => {
+      const buffer = terminal.buffer.active, line = buffer.getLine(buffer.baseY + buffer.cursorY);
+      // The outer renderer pads rows with literal spaces; trim that display
+      // padding while retaining the dim-text and cursor guards.
+      return buffer.cursorX === 2 && buffer.cursorY === 9 && line?.translateToString(true).trimEnd() === '› Ask Codex to do anything' &&
+        Array.from({length: 23}, (_, i) => line.getCell(i+2)?.isDim()).every(Boolean);
+    };
+    await until(() => visible().includes('fixture-ready 90x25') && pendingOuterWrites === 0 &&
+      !terminal.modes.synchronizedOutputMode && outerComposerReady(), 'real bridge resized composer acknowledged');
     outer.write(`${CSI}B`); await until(selected, 'plain Down selected actual correlated agent');
     outer.write('\r'); await until(() => visible().includes(answer), 'real Python details returned actual child answer');
     assert.deepEqual(fs.readFileSync(childLog), beforeLog, 'viewing details never changes or resumes the child session');
@@ -481,7 +510,9 @@ process.stdin.on('data',data=>{const text=data.replace(/\\x1b(?:\\[[0-?]*[ -/]*[
     assert.deepEqual(fs.readFileSync(childLog), beforeLog);
     assert.ok(output.includes(`${CSI}?1049l`));
   } catch (error) {
-    failure = error; throw diagnose(error, runtime, { outerPid: outer.pid, exited, exitCode, replies, visible: visible(), vt: output.slice(-6000) });
+    const buffer = terminal.buffer.active, line = buffer.getLine(buffer.baseY + buffer.cursorY);
+    failure = error; throw diagnose(error, runtime, { outerPid: outer.pid, exited, exitCode, replies, visible: visible(), vt: output.slice(-6000),
+      readyState: { pendingOuterWrites, x: buffer.cursorX, y: buffer.cursorY, text: line?.translateToString(true), dim: Array.from({length: 23}, (_, i) => line?.getCell(i+2)?.isDim()), sync: terminal.modes.synchronizedOutputMode } });
   } finally {
     await stopFixture(outer, () => exited, runtime, failure);
     terminal.dispose(); await removeFixture(base, failure);

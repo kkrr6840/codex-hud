@@ -54,7 +54,9 @@ Windows 创建 `~/.local/bin/codex.cmd`，在已安装的 Windows PowerShell / P
 
 ## 选择显示内容（v0.4）
 
-**按 Ctrl-b，松开后按大写 C** 打开设置菜单。Mac 中方向键选择、空格开关，`1/2/3` 选择精简/标准/完整预设，`L` 切换布局、`G` 切换语言；Windows 中用 ↑/↓ 选择预设、Enter 应用，也可用 F8 打开。`Esc` 关闭。修改即时保存，约一秒后刷新，不用重新进入会话。两端均可通过 hud skill 修改全部设置。
+**按 Ctrl-b，松开后按大写 C** 打开设置菜单。Mac 中方向键选择、空格开关，`1/2/3/4` 选择精简/标准/完整/专注预设，`L` 切换布局、`G` 切换语言；Windows 中用 ↑/↓ 选择预设、Enter 应用，也可用 F8 打开。`Esc` 关闭。修改即时保存，约一秒后刷新，不用重新进入会话。两端均可通过 hud skill 修改全部设置。
+
+v0.7 的专注布局（`focus`）减少与原生界面重复的模型、力度和路径，合并 Token 与缓存百分比，保留上下文/额度进度条、Skills 和任务活动。可以直接对 hud skill 说“使用专注布局”。已有自定义设置保留；静止画面不再重复清屏绘制，滚动、选中、尺寸或颜色变化仍会刷新。
 
 也可以在 `/skills` 选择 **hud**，直接说“只保留模型、上下文和额度”“隐藏分流”“显示 Git 领先落后”“用英文紧凑布局”。高级配置同样可通过这个 skill 修改，无需手改配置文件。
 
@@ -68,7 +70,7 @@ Windows 创建 `~/.local/bin/codex.cmd`，在已安装的 Windows PowerShell / P
 | 额度 | `quota_value`: used/remaining；`quota_style`: bar/text/compact；`reset_format`: relative/absolute/both/elapsed/elapsed_absolute；时制、秒、显示阈值、消耗速度提示 |
 | Git | dirty、ahead_behind、file_stats、worktree、wrap、push_warning、push_critical |
 | 样式 | 简体/繁体/英文、路径层数、模型简称/覆盖、力度文字/符号、提供商标签、自定义文字、颜色名/256 色/#rrggbb、单列宽进度条字符 |
-| 活动 | `tools_limit`、`agents_limit`、`agents_show_completed`、`agents_show_failed`、`tool_name_length`；工具显示最近至多 200 条记录的活动，不冒充全部历史 |
+| 活动 | `skills_limit`、`tools_limit`、`agents_limit`、`agents_show_completed`、`agents_show_failed`、`tool_name_length`；工具显示最近至多 200 条记录的活动，不冒充全部历史 |
 
 开发者也可使用 `codex-hud config --show quota_5h,quota_weekly --hide tokens`，或 `codex-hud config --set 'git.ahead_behind=true'`。预设只修改显示开关和布局，保留自定义颜色等其他设置。
 
@@ -79,6 +81,7 @@ Windows 创建 `~/.local/bin/codex.cmd`，在已安装的 Windows PowerShell / P
 - 当前会话目录的 Git 分支与变更状态。
 - 最近工具活动、明确的 `update_plan` 计划事件、MCP 工具名、会话名称、CLI 版本、时长和压缩次数；可选显示本地配置数量、系统物理 RAM。
 - 原生子 agent 的名称、任务、状态和耗时；来自父子线程关系和轮次事件，不以进程数代替 agent 数。
+- 本轮已读 Skills：来自主线程成功读取 `SKILL.md` 的命令记录，显示名称，进入下一轮后重置。任务结束后保留最近一轮列表，不混入子 agent/中转记录，也不把已安装目录或可用技能目录当作已读取。它表示已读取指令，不表示持续运行或仍全部保留在压缩后的上下文；未记录、加密或不支持的读取无法显示。
 - codex-x-codex 的开关状态，以及本会话及其子 agent 关联的分流状态和完成用量；不把全局记录混入当前会话。
 
 初次进入或切换到无数据的新会话时，面板完全隐藏；有实际数据后自动出现。缺少的字段、空 agent 和空分流区域不显示，面板高度随内容收缩。真实读取错误和已有任务的未知用量仍会明确提示。
@@ -125,7 +128,7 @@ Mac 插件升级后，可让 hud skill 执行 `codex-hud refresh --session <当�
 | 上下文、额度、剩余/已用、重置时间、消耗速度提示、缓存命中率 | 已实现；按官方窗口长度识别 5 小时/7 天，其他窗口保留真实名称和分钟数；未返回则隐藏 |
 | 工具、MCP、子 agent、待办、时间、压缩、RAM、配置数量 | 已实现；MCP 仅依据明确的 mcp__ 工具事件，计划仅依据明确 update_plan 事件，配置计数不等于实际加载数量 |
 | 会话/每日/每周费用、路由费用、纯 API 输出速度、prompt cache 到期 | 当前 Codex 数据不完整，暂不支持；不以 token 估算真实账单，不把工具等待算成 API 速度，不猜缓存 TTL |
-| 活动 Skill、advisor、输出风格、登录用户名 | 无可靠对应事件或属于 Claude 专有字段；不把读取 SKILL.md 当成技能执行 |
+| Skill、advisor、输出风格、登录用户名 | 可显示本轮成功读取的 SKILL.md 名称；持续执行状态和其他专有字段缺少可靠对应，不把已读指令当成持续运行 |
 | jj、外部额度文件/写出、额外状态命令、余额来源合并 | 本版未实现；不会拿 Claude 的账号窗口补 Codex 缺失额度 |
 | 原生 statusLine 回调 | Mac 使用 tmux，Windows 使用 ConPTY 终端后端；未修改官方 CLI，显示配置实时更新 |
 

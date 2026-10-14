@@ -14,9 +14,12 @@ A persistent bottom panel for the official Codex CLI. Configure it once, then ke
 - **Context and quotas:** colored progress bars for context usage and available 5-hour, weekly, or other quota windows. Missing data stays hidden.
 - **Token usage:** main-thread input, cached input, output, and reasoning tokens, with a separate cache ratio. Agent usage is shown separately.
 - **Session activity:** native agents, recent tools, recorded plans, and session-scoped codex-x-codex relay jobs.
+- **Read skills:** names of SKILL.md instructions successfully read by the main thread in the current or most recent turn. The list resets on the next turn and excludes child/relay reads. Installed metadata is not counted as loaded instructions; encrypted or unsupported read events remain unavailable.
 - **Git and environment:** branch, working-tree changes, optional ahead/behind counts, directory, session information, and other display items.
 - **Live customization:** visibility, presets, compact or expanded layout, colors, ordering, and English or Chinese labels. Preferences take effect without restarting an active HUD.
 - **Clean startup:** the panel stays hidden until data is available and adjusts its height to the content.
+
+v0.7 adds the **focus** preset: hide model/effort/path already shown by the native CLI, keep context/quota bars and activity, and merge token totals with a compact cache percentage. Ask the hud skill to use focus, choose 4 in the Mac settings menu, or select focus in the Windows menu. Unrelated preferences stay intact. Idle Mac HUD frames no longer clear and repaint repeatedly; scrolling, selection, resize, and color changes still refresh.
 
 ## Requirements
 

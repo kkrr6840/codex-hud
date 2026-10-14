@@ -94,10 +94,49 @@ class ConfigTest(unittest.TestCase):
         self.assertLess(len(wide), len(narrow))
 
     def test_all_presets_are_valid_and_keep_thresholds_separate(self):
-        for name in ("minimal", "standard", "full"):
+        for name in ("minimal", "standard", "full", "focus"):
             save(preset(name))
             validate(load()[0])
         self.assertIn(color_index("#00ff00"), range(256))
+
+    def test_focus_keeps_usage_and_skills_without_repeating_native_model_and_path(self):
+        save(preset("focus"))
+        snapshot = self.snapshot()
+        snapshot["root"]["skills"] = ["openai-docs", "codex-hud:hud"]
+        text = "\n".join(r.text for r in render_rows(snapshot, config=load()[0]))
+        self.assertNotIn("test-model", text)
+        self.assertIn("openai-docs", text)
+        self.assertIn("本轮已读", text)
+        self.assertIn("主会话 Token", text)
+        self.assertIn("缓存 80%", text)
+        self.assertFalse(load()[0]["show"]["project"])
+
+    def test_unchanged_frames_do_not_redraw_but_colors_size_and_scroll_do(self):
+        class Screen:
+            size = (3, 100)
+            erases = 0
+            refreshes = 0
+            def getmaxyx(self): return self.size
+            def erase(self): self.erases += 1
+            def addstr(self, *args): pass
+            def refresh(self): self.refreshes += 1
+        screen, cache = Screen(), {}
+        snapshot = self.snapshot()
+        snapshot["display"] = deepcopy(DEFAULT)
+        renderer = SimpleNamespace(color_pair=lambda _: 0, A_BOLD=0, A_REVERSE=0, error=Exception)
+        with patch("codex_hud.display.curses", renderer):
+            paint(screen, snapshot, expanded=True, frame_cache=cache)
+            snapshot["time"] += 1
+            paint(screen, snapshot, expanded=True, frame_cache=cache)
+            self.assertEqual((screen.erases, screen.refreshes), (1, 1))
+            paint(screen, snapshot, scroll=1, expanded=True, frame_cache=cache)
+            self.assertEqual(screen.refreshes, 2)
+            snapshot["display"]["colors"]["model"] = "#ff0000"
+            paint(screen, snapshot, scroll=1, expanded=True, frame_cache=cache)
+            self.assertEqual(screen.refreshes, 3)
+            screen.size = (4, 80)
+            paint(screen, snapshot, scroll=1, expanded=True, frame_cache=cache)
+            self.assertEqual(screen.refreshes, 4)
 
     def test_expanded_view_can_scroll_past_all_header_rows(self):
         class Screen:

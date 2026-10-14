@@ -288,6 +288,7 @@ def panel(runtime):
         config, config_error = load({"height": spec["hud_height"]})
         init_colors(config)
         scroll, refresh, snapshot, expanded = 0, 0, None, False
+        frame_cache = {}
         while True:
             if (runtime / "exit.json").exists():
                 break
@@ -391,7 +392,7 @@ def panel(runtime):
                     view = snapshot
             else:
                 view = snapshot
-            scroll = paint(screen, view, scroll, expanded, selected)
+            scroll = paint(screen, view, scroll, expanded, selected, frame_cache)
             time.sleep(0.1)
     try:
         curses.wrapper(ui)

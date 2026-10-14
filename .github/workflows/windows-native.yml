@@ -42,7 +42,7 @@ jobs:
 
           patterns = (
               "test_agents.py", "test_config.py", "test_display.py", "test_sources.py",
-              "test_native_bridge.py", "test_keys.py", "test_windows_setup.py",
+              "test_native_bridge.py", "test_keys.py", "test_windows_setup.py", "test_skills.py",
           )
           suite = unittest.TestSuite()
           for pattern in patterns:

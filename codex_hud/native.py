@@ -120,7 +120,7 @@ class Bridge:
                     raise ValueError("changes must be an object")
                 name = changes.pop("preset", None)
                 if name is not None:
-                    if name not in ("minimal", "standard", "full"):
+                    if name not in ("minimal", "standard", "full", "focus"):
                         raise ValueError("unknown preset")
                     changes = {**preset(name), **changes}
                 save(changes)
