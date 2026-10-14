@@ -82,6 +82,14 @@ Preferences are stored in `~/.config/codex-hud/display.json`. An optional `overr
 
 After an upgrade, ask the hud skill to refresh the current HUD. This replaces only the observer and keeps the main CLI running.
 
+## Select and inspect agents (v0.5)
+
+Press **Alt+Down**, or press **Ctrl-b**, release it, then press **Down**. Down also opens the selector when the compact HUD pane has focus. Ordinary arrow keys in the main CLI retain their editing behavior.
+
+Use **Up/Down** to select a native agent or a relay job correlated to the current conversation. **Enter** opens live details: task, model, status, elapsed time, reported usage, recent tools, and readable assistant output. Arrows scroll the detail view; **Esc** returns to the list and then to the main CLI; **q** closes immediately.
+
+The viewer reads existing records without resuming an agent or acquiring its writer. It reads the last five assistant messages available in a 128 KB transcript tail and excludes inherited messages dated before the child session was created. Relay jobs can display their returned answer even when their worker transcript was not saved. Output outside the read window, encrypted records, and results not yet produced stay unavailable. Unknown usage stays unknown. For the complete native subagent conversation and continuing its work, use Codex's **`/subagents`** command.
+
 ## Data accuracy and limitations
 
 Each panel is bound to its own thread using invocation-specific diagnostics and official local session records. Agent counts come from thread relations and turn events, not process counts. Other sessions' activity is excluded.

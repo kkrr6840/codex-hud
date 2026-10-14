@@ -226,6 +226,7 @@ class View:
             for state in ("running", "completed", "idle", "failed", "unknown"):
                 if counts[state]:
                     spans.append((f" {counts[state]} {self.state(state)}", STATE_COLOR[state]))
+            spans.append((" · Alt+↓ " + self.tr("查看", "inspect", "檢視"), "dim"))
             self.put(name, spans)
             limit = self.c["agents_limit"] or len(items)
             for item in items[:limit]:

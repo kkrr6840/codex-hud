@@ -42,6 +42,12 @@ def configure_terminal(spec):
         tmux(socket, "set-option", "-s", f"terminal-features[{max(indices, default=-1) + 1}]", "tmux*:sync")
 
 
+def bind_agents(spec):
+    popup = ("display-popup", "-E", "-w", "90%", "-h", "85%", command("_agents", spec["runtime"]))
+    tmux(spec["socket"], "bind-key", "Down", *popup)
+    tmux(spec["socket"], "bind-key", "-n", "M-Down", *popup)
+
+
 def launch(argv):
     parser = argparse.ArgumentParser(prog="codex-hud", description="官方 Codex CLI + 独立 tmux 固定底部 HUD。CLI 参数可直接传入，或放在 -- 后。")
     parser.add_argument("--detach", action="store_true", help="后台启动，打印附加命令")
@@ -101,6 +107,7 @@ def launch(argv):
         atomic_json(runtime / "spec.json", spec)
         tmux(socket, "bind-key", "H", "run-shell", command("_toggle", runtime))
         tmux(socket, "bind-key", "C", "display-popup", "-E", "-w", "85%", "-h", "85%", command("config", "--menu"))
+        bind_agents(spec)
         tmux(socket, "select-pane", "-t", spec["top"])
         watcher = subprocess.Popen([sys.executable, str(ENTRY), "_watch", str(runtime)],
                                    stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
@@ -250,7 +257,10 @@ def panel(runtime):
             if (runtime / "exit.json").exists():
                 break
             key = screen.getch()
-            if key in (curses.KEY_DOWN, ord("j")):
+            if key == curses.KEY_DOWN and not expanded and snapshot and (snapshot["agents"] or snapshot["offload"]["jobs"]):
+                subprocess.Popen(["tmux", "-L", spec["socket"], "display-popup", "-E", "-w", "90%", "-h", "85%", command("_agents", runtime)],
+                                 stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            elif key in (curses.KEY_DOWN, ord("j")):
                 scroll += 1
             elif key in (curses.KEY_UP, ord("k")):
                 scroll = max(0, scroll - 1)
@@ -397,6 +407,7 @@ def refresh_panels(argv):
         tmux(socket, "respawn-pane", "-k", "-t", spec["hud"], command("_panel", runtime))
         tmux(socket, "bind-key", "H", "run-shell", command("_toggle", runtime))
         tmux(socket, "bind-key", "C", "display-popup", "-E", "-w", "85%", "-h", "85%", command("config", "--menu"))
+        bind_agents(spec)
         after = tmux(socket, "display-message", "-p", "-t", spec["top"], "#{pane_pid}").stdout.strip()
         if before != after:
             raise RuntimeError("CLI pane identity changed while refreshing HUD")
@@ -417,6 +428,9 @@ def main(argv=None):
     if argv and argv[0] in ("setup", "configure"):
         from .integration import configure
         return configure(argv[1:])
+    if argv and argv[0] == "_agents":
+        from .agents import run
+        return run(argv[1])
     if argv and argv[0] in ("_run", "_panel", "_toggle", "_watch"):
         return {"_run": runner, "_panel": panel, "_toggle": toggle, "_watch": watch}[argv[0]](argv[1])
     if argv and argv[0] == "inspect":

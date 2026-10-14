@@ -172,7 +172,11 @@ f.close()
     def test_nested_tmux_terminal_uses_synchronized_updates_and_steady_cursor(self):
         self.assert_auto_launch(terminal="tmux-256color")
 
-    def assert_auto_launch(self, cached=False, terminal="xterm-256color"):
+    @unittest.skipUnless(sys.platform == "darwin", "macOS BSD script PTY test")
+    def test_agent_popup_navigates_live_output_without_restarting_cli(self):
+        self.assert_auto_launch(inspect_agents=True)
+
+    def assert_auto_launch(self, cached=False, terminal="xterm-256color", inspect_agents=False):
         Path(self.env["CODEX_HUD_SHELL_RC"]).write_text('codex() { HTTP_PROXY="http://fixture.invalid" command codex "$@"; }\n')
         if not cached:
             result = subprocess.run([sys.executable, str(ENTRY), "setup", "--enable"],
@@ -211,6 +215,40 @@ f.close()
             terminal_bytes = (self.base / "terminal-output.log").read_bytes()
             self.assertIn(b"\x1b[?2026h", terminal_bytes)
             self.assertIn(b"\x1b[?2026l", terminal_bytes)
+        if inspect_agents:
+            import sqlite3
+            home = Path(spec["home"])
+            child = "00000000-0000-0000-0000-000000000001"
+            path = home / "sessions" / ("rollout-"+child+".jsonl")
+            path.write_text(json.dumps({"type": "session_meta", "payload": {"id": child}})+"\n")
+            def result(value):
+                with path.open("a") as f:
+                    f.write(json.dumps({"type": "response_item", "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": value}]}})+"\n")
+            result("Agent output one")
+            with sqlite3.connect(home / "state_5.sqlite") as db:
+                db.executescript("CREATE TABLE threads(id TEXT,source TEXT,rollout_path TEXT,model TEXT,agent_nickname TEXT); CREATE TABLE thread_spawn_edges(parent_thread_id TEXT,child_thread_id TEXT,status TEXT);")
+                db.execute("INSERT INTO threads VALUES(?,?,?,?,?)", (identity, "cli", str(home / "sessions" / f"rollout-{identity}.jsonl"), "fixture-model", None))
+                db.execute("INSERT INTO threads VALUES(?,?,?,?,?)", (child, "subagent", str(path), "child-model", "inspect-child"))
+                db.execute("INSERT INTO thread_spawn_edges VALUES(?,?,?)", (identity, child, "open"))
+            self.wait_for(lambda: any(a["id"] == child for a in self.snapshot(spec).get("agents", [])))
+            before = self.tmux(spec, "display-message", "-p", "-t", spec["top"], "#{pane_pid}").stdout
+            def terminal_contains(value):
+                return value in (self.base / "terminal-output.log").read_bytes().decode(errors="replace")
+            # Exercise the actual prefix+Down binding on the attached client.
+            proc.stdin.write(b"\x02\x1b[B"); proc.stdin.flush()
+            self.wait_for(lambda: terminal_contains("Agent 选择器"))
+            def popup_pids():
+                output = subprocess.check_output(["ps", "-axo", "pid=,command="], text=True)
+                return [line.split()[0] for line in output.splitlines() if " _agents " + spec["runtime"] in line]
+            self.wait_for(popup_pids)
+            proc.stdin.write(b"\r"); proc.stdin.flush()
+            self.wait_for(lambda: terminal_contains("Agent output one"))
+            result("Agent output two")
+            self.wait_for(lambda: terminal_contains("Agent output two"))
+            proc.stdin.write(b"q"); proc.stdin.flush()
+            self.wait_for(lambda: not popup_pids())
+            self.wait_for(lambda: self.tmux(spec, "display-message", "-p", "-t", spec["top"], "#{pane_active}").stdout.strip() == "1")
+            self.assertEqual(self.tmux(spec, "display-message", "-p", "-t", spec["top"], "#{pane_pid}").stdout, before)
         self.send(spec, "quit")
         self.wait_for(lambda: not Path(spec["runtime"]).exists())
 

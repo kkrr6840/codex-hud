@@ -353,7 +353,8 @@ class Rollout:
                                ended=timestamp(when), usage=(response or {}).get("usage"),
                                duration=(response or {}).get("duration_seconds"),
                                model=(response or {}).get("model") or job["model"],
-                               worker_id=(response or {}).get("thread_id"), error=(response or {}).get("error"))
+                               worker_id=(response or {}).get("thread_id"), error=(response or {}).get("error"),
+                               output=(response or {}).get("answer"))
 
 
 def read_literal_object(source):
@@ -460,7 +461,7 @@ def offload_job(row, configured_model, launched_at=None):
             "model": (response or {}).get("model") or option("--model", configured_model),
             "duration": (response or {}).get("duration_seconds"),
             "usage": (response or {}).get("usage"), "worker_id": (response or {}).get("thread_id"),
-            "error": (response or {}).get("error")}
+            "error": (response or {}).get("error"), "output": (response or {}).get("answer")}
 
 
 class Collector:

@@ -55,7 +55,7 @@ class SourcesTest(unittest.TestCase):
         return path
 
     def job(self, owner, identity, status="completed", usage=None, ordinal=10):
-        response = {"ok": True, "outcome": "completed", "model": "worker-model", "duration_seconds": 2.5, "usage": usage, "thread_id": "worker-id"}
+        response = {"ok": True, "outcome": "completed", "model": "worker-model", "duration_seconds": 2.5, "usage": usage, "thread_id": "worker-id", "answer": "Result for " + identity}
         item = {"id": identity, "type": "commandExecution", "status": status,
                 "commandActions": [{"command": "python3 /Users/test/Projects/codex-x-codex/scripts/offload.py run --task 'read one file'"}],
                 "aggregatedOutput": json.dumps(response) if status == "completed" else ""}
@@ -76,6 +76,7 @@ class SourcesTest(unittest.TestCase):
         self.assertEqual({a["id"] for a in snapshot["agents"]}, {"child-A", "grandchild-A"})
         self.assertEqual({a["task"] for a in snapshot["agents"]}, {"Check A", "Check nested"})
         self.assertEqual(sum(j["usage"]["input_tokens"] for j in snapshot["offload"]["jobs"]), 579)
+        self.assertEqual({j["output"] for j in snapshot["offload"]["jobs"]}, {"Result for a", "Result for nested"})
         self.assertFalse(snapshot["errors"])
 
     def test_model_selection_refreshes_without_new_turn_and_is_thread_scoped(self):

@@ -1,6 +1,6 @@
 {
   "name": "codex-hud",
-  "version": "0.4.2",
+  "version": "0.5.0",
   "description": "Persistent terminal HUD for the official Codex CLI, with session-scoped native agents and relay usage.",
   "skills": "./skills/"
 }
