@@ -116,6 +116,20 @@ class DisplayTest(unittest.TestCase):
         self.assertTrue(any(r.key == ("native", "0") for r in visible))
         self.assertTrue(any(r.key == ("relay", "0") for r in visible))
 
+    def test_ended_unknown_relay_is_hidden_without_inventing_a_success(self):
+        snapshot = self.snapshot()
+        snapshot["offload"]["jobs"] = [
+            {"id": "ended", "model": "ended-relay", "status": "unknown", "ended": 100, "usage": None},
+            {"id": "unresolved", "model": "unresolved-relay", "status": "unknown", "ended": None, "usage": None},
+        ]
+        rows = render_rows(snapshot)
+        self.assertEqual([row.key for row in rows if row.key], [("relay", "unresolved")])
+        self.assertTrue(any("1 未知" in row.text for row in rows))
+        self.assertIsNone(snapshot["offload"]["jobs"][0]["usage"])
+        self.assertEqual(snapshot["offload"]["jobs"][0]["status"], "unknown")
+        history = render_rows(snapshot, config={**DEFAULT, "agents_show_completed": True})
+        self.assertEqual([row.key for row in history if row.key], [("relay", "ended"), ("relay", "unresolved")])
+
     def test_quotas_use_window_length_and_show_remaining_with_local_reset(self):
         snapshot = self.snapshot()
         reset = 1792476628

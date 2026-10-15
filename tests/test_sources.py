@@ -8,7 +8,7 @@ import unittest
 from unittest.mock import patch
 
 from codex_hud.display import clean, elapsed, lines
-from codex_hud.sources import Collector, Diagnostic, Rollout, offload_job, turn_state, response_json
+from codex_hud.sources import Collector, Diagnostic, Rollout, offload_job, turn_state, response_json, literal_tool_requests
 
 
 class SourcesTest(unittest.TestCase):
@@ -293,6 +293,85 @@ class SourcesTest(unittest.TestCase):
     def test_plugin_json_field_order_is_irrelevant(self):
         response = response_json('{"usage":{"input_tokens":42},"outcome":"completed","ok":true}')
         self.assertEqual(response["usage"]["input_tokens"], 42)
+
+    def test_parallel_relay_is_visible_before_projection_and_ignores_other_results(self):
+        path = self.thread("root-A")
+        self.thread("root-B")
+        command = "python3 /path/codex-x-codex/scripts/offload.py run --task 'audit'"
+        source = "const results = await Promise.allSettled([tools.exec_command({cmd:" + json.dumps(command) + "}), tools.exec_command({cmd:'other check'})]); results.forEach((r,i)=>text({i,...r}));"
+        def append(payload):
+            with path.open("a") as handle:
+                handle.write(json.dumps({"type": "response_item", "timestamp": "2026-10-15T08:23:35Z", "payload": payload}) + "\n")
+        append({"type": "custom_tool_call", "name": "exec", "call_id": "parallel", "input": source})
+        # The unrelated command completes first with a failed exit. It must not
+        # terminate the relay or lend it another command's output/usage.
+        output = [{"text": json.dumps({"i": i, "status": "fulfilled", "value": value})} for i, value in (
+            (1, {"exit_code": 9, "output": '{"ok":true,"outcome":"completed","usage":{"input_tokens":999}}'}),
+            (0, {"session_id": 92425, "exit_code": None, "output": "", "wall_time_seconds": 1}),
+        )]
+        append({"type": "custom_tool_call_output", "call_id": "parallel", "output": output})
+        collector = Collector(home=self.home, root_id="root-A")
+        snapshot = collector.collect()
+        self.assertEqual(len(snapshot["offload"]["jobs"]), 1)
+        job = snapshot["offload"]["jobs"][0]
+        self.assertEqual((job["status"], job["process_id"], job["ended"]), ("running", "92425", None))
+        self.assertIsNone(job["usage"])
+        self.assertTrue(any("1 运行" in row for row, _ in lines(snapshot)))
+        self.assertEqual(Collector(home=self.home, root_id="root-B").collect()["offload"]["jobs"], [])
+        # The native database only projects the command later. One real job is
+        # retained rather than showing both the live and projected records.
+        self.job("root-A", "projected", usage={"input_tokens": 500})
+        item = json.loads(self.history.execute("SELECT item_json FROM thread_items").fetchone()[0])
+        item["processId"] = "92425"
+        self.history.execute("UPDATE thread_items SET item_json=?", (json.dumps(item),))
+        self.history.commit()
+        jobs = collector.collect()["offload"]["jobs"]
+        self.assertEqual([(j["status"], j["usage"]["input_tokens"]) for j in jobs], [("completed", 500)])
+
+    def test_parallel_relays_and_polls_keep_distinct_sessions_and_usage(self):
+        path = self.thread("root-A")
+        reader = Rollout(path)
+        reader.refresh()
+        command = "python3 /path/codex-x-codex/scripts/offload.py run --task 'check'"
+        source = "await Promise.all([tools.exec_command({cmd:" + json.dumps(command) + "}), tools.exec_command({cmd:" + json.dumps(command) + "})]);"
+        reader.tool_call({"name": "exec", "call_id": "start", "input": source}, 100)
+        reader.tool_output({"call_id": "start", "output": "Script running with cell ID batch-cell"}, 100)
+        reader.tool_call({"name": "wait", "call_id": "wait", "arguments": '{"cell_id":"batch-cell"}'}, 101)
+        reader.tool_output({"call_id": "wait", "output": "\n".join(json.dumps({"i": i, "value": {"session_id": session, "output": ""}}) for i, session in ((1, 22), (0, 11)))}, 101)
+        self.assertEqual({j["process_id"] for j in reader.jobs.values()}, {"11", "22"})
+        reader.tool_call({"name": "exec", "call_id": "poll", "input": "await Promise.allSettled([tools.write_stdin({session_id:22}), tools.write_stdin({session_id:11})]);"}, 102)
+        responses = []
+        for i, amount in ((1, 111), (0, 222)):
+            response = {"ok": True, "outcome": "completed", "usage": {"input_tokens": amount}, "thread_id": f"worker-{amount}"}
+            responses.append({"text": json.dumps({"i": i, "status": "fulfilled", "value": {"exit_code": 0, "output": json.dumps(response)}})})
+        reader.tool_output({"call_id": "poll", "output": responses}, 103)
+        self.assertEqual({j["process_id"]: (j["status"], j["usage"]["input_tokens"]) for j in reader.jobs.values()}, {"11": ("completed", 111), "22": ("completed", 222)})
+
+    def test_literal_batches_count_non_tool_entries_and_ignore_ambiguous_javascript(self):
+        source = '''// tools.exec_command({cmd:"fake"})
+        const example = "tools.exec_command({cmd:'fake'})";
+        await Promise.allSettled([Promise.resolve(7), tools.exec_command({cmd:'real'}), tools.exec_command(options)]);'''
+        self.assertEqual(literal_tool_requests(source), [("exec_command", "real", 1), ("exec_command", None, 2)])
+        self.assertEqual(literal_tool_requests("tools.exec_command({cmd:'prefix' + dynamic})"), [("exec_command", None, None)])
+        nested = literal_tool_requests("Promise.all([wrapper(tools.exec_command({cmd:'nested'})), tools.exec_command({cmd:'direct'})])")
+        self.assertEqual(nested, [("exec_command", "nested", -1), ("exec_command", "direct", 1)])
+        self.assertEqual(literal_tool_requests("Promise.all([...previous, tools.exec_command({cmd:'later'})])"), [("exec_command", "later", -1)])
+        reader = Rollout(self.thread("root-A"))
+        reader.refresh()
+        reader.tool_call({"name": "exec", "call_id": "dynamic", "input": "tools.exec_command(options)"}, 100)
+        self.assertFalse(reader.jobs)
+
+    def test_only_visible_agents_surface_missing_log_warnings(self):
+        self.thread("root-A")
+        for child, status in (("finished", "completed"), ("failed", "failed"), ("active", "inProgress")):
+            self.thread(child, "root-A", status).unlink()
+        collector = Collector(home=self.home, root_id="root-A")
+        snapshot = collector.collect()
+        self.assertEqual(snapshot["errors"], ["Nick-active 日志不可读"])
+        self.assertTrue(all(a.get("log_error") for a in snapshot["agents"]))
+        self.assertTrue(all(a["usage"] is None for a in snapshot["agents"]))
+        history = collector.collect({"agents_show_completed": True, "agents_show_failed": True})
+        self.assertEqual(set(history["errors"]), {"Nick-finished 日志不可读", "Nick-failed 日志不可读", "Nick-active 日志不可读"})
 
     def test_unreadable_log_does_not_keep_stale_tokens(self):
         path = self.thread("root-A")

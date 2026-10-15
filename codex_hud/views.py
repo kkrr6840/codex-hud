@@ -237,7 +237,7 @@ class View:
             self.put("todos", [(" " + self.tr("计划", "Plan", "計畫") + f" {complete}/{len(todos)} ", "model"), (clean(current), "muted")])
         for name, items in [("agents", self.s["agents"]), ("offload", self.s["offload"]["jobs"])]:
             if not self.c["agents_show_completed"]:
-                items = [item for item in items if item.get("status") != "completed"]
+                items = [item for item in items if item.get("status") != "completed" and not (item.get("status") == "unknown" and item.get("ended") is not None)]
             if not self.c["agents_show_failed"]:
                 items = [item for item in items if item.get("status") != "failed"]
             if not self.show[name] or not items:

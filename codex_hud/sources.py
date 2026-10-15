@@ -284,37 +284,36 @@ class Rollout:
             plan = read_literal_object(source).get("plan")
             if isinstance(plan, list):
                 self.data["todos"] = [{"step": p["step"], "status": p["status"]} for p in plan if isinstance(p, dict) and isinstance(p.get("step"), str) and p.get("status") in ("pending", "in_progress", "completed")]
-        commands, sessions = [], []
+        requests = []
         if name == "exec_command":
             args = read_literal_object(source)
             if isinstance(args.get("cmd"), str):
-                commands = [args["cmd"]]
+                requests = [("exec_command", args["cmd"], None)]
         elif name in ("exec", "functions.exec"):
-            for match in re.finditer(r'''(?:\bcmd\b|"cmd"|'cmd')\s*:\s*("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*')''', source):
-                try:
-                    commands.append(ast.literal_eval(match[1]))
-                except (SyntaxError, ValueError):
-                    continue
-            sessions = [int(x) for x in re.findall(r'''(?:\bsession_id\b|"session_id"|'session_id')\s*:\s*(\d+)''', source)]
+            requests = literal_tool_requests(source)
         elif name == "write_stdin":
             args = read_literal_object(source)
             if isinstance(args.get("session_id"), int):
-                sessions = [args["session_id"]]
+                requests = [("write_stdin", args["session_id"], None)]
         elif name == "wait":
             args = read_literal_object(source)
             cell = str(args.get("cell_id", ""))
             if cell in self.cells:
-                self.calls[call] = ("poll", self.cells[cell])
-        # Multi-command code outputs can reorder: require a single explicit run.
-        if len(commands) == 1:
-            item = {"id": call, "command": commands[0], "status": "unknown"}
-            job = offload_job({"thread_id": self.data.get("id"), "item_json": json.dumps(item),
-                              "created_at_ms": (timestamp(when) or 0) * 1000}, "gpt-6-astra")
-            if job:
-                self.jobs[call] = job
-                self.calls[call] = ("start", call)
-        if len(sessions) == 1 and sessions[0] in self.tool_sessions:
-            self.calls[call] = ("poll", self.tool_sessions[sessions[0]])
+                self.calls[call] = self.cells[cell]
+        bindings = []
+        for position, (kind, value, index) in enumerate(requests):
+            if kind == "exec_command" and isinstance(value, str):
+                identity = call if len(requests) == 1 else f"{call}:{position}"
+                item = {"id": identity, "command": value, "status": "unknown"}
+                job = offload_job({"thread_id": self.data.get("id"), "item_json": json.dumps(item),
+                                  "created_at_ms": (timestamp(when) or 0) * 1000}, "gpt-6-astra")
+                if job:
+                    self.jobs[identity] = job
+                    bindings.append((identity, index))
+            elif kind == "write_stdin" and value in self.tool_sessions:
+                bindings.append((self.tool_sessions[value], index))
+        if bindings:
+            self.calls[call] = bindings
 
     def tool_output(self, payload, when):
         tool = self.activity.get(payload.get("call_id"))
@@ -328,33 +327,123 @@ class Rollout:
                         tool["status"] = "failed"
             if tool.get("started") is not None and tool.get("ended") is not None:
                 tool["duration"] = max(0, tool["ended"] - tool["started"])
-        binding = self.calls.get(payload.get("call_id"))
-        if not binding:
-            return
-        job = self.jobs.get(binding[1])
-        if not job:
+        bindings = self.calls.get(payload.get("call_id"))
+        if not bindings:
             return
         output = payload.get("output") or ""
         texts = [output] if isinstance(output, str) else [x.get("text", "") for x in output if isinstance(x, dict)]
         for text in texts:
             cell = re.search(r"Script running with cell ID (\S+)", text)
             if cell:
-                self.cells[cell[1]] = binding[1]
-            for value in json_objects(text):
-                if isinstance(value.get("session_id"), int) and "output" in value:
-                    job["process_id"] = str(value["session_id"])
-                    self.tool_sessions[value["session_id"]] = binding[1]
-                    if job["status"] != "running":
-                        job["started"] = (timestamp(when) or time.time()) - value.get("wall_time_seconds", 0)
-                    job["status"] = "running"
-                if "exit_code" in value and "output" in value:
-                    response = response_json(value.get("output"))
-                    job.update(status="completed" if response and response.get("ok") else "failed" if value.get("exit_code") or (response and not response.get("ok")) else "unknown",
-                               ended=timestamp(when), usage=(response or {}).get("usage"),
-                               duration=(response or {}).get("duration_seconds"),
-                               model=(response or {}).get("model") or job["model"],
-                               worker_id=(response or {}).get("thread_id"), error=(response or {}).get("error"),
-                               output=(response or {}).get("answer"))
+                self.cells[cell[1]] = bindings
+            for index, value in command_outputs(text):
+                for identity, expected in bindings:
+                    if (expected is not None and index != expected) or identity not in self.jobs:
+                        continue
+                    job = self.jobs[identity]
+                    if type(value.get("session_id")) is int and "output" in value:
+                        job["process_id"] = str(value["session_id"])
+                        self.tool_sessions[value["session_id"]] = identity
+                        if job["status"] != "running":
+                            job["started"] = (timestamp(when) or time.time()) - value.get("wall_time_seconds", 0)
+                        job["status"] = "running"
+                    if type(value.get("exit_code")) is int and "output" in value:
+                        response = response_json(value.get("output"))
+                        job.update(status="completed" if response and response.get("ok") else "failed" if value.get("exit_code") or (response and not response.get("ok")) else "unknown",
+                                   ended=timestamp(when), usage=(response or {}).get("usage"),
+                                   duration=(response or {}).get("duration_seconds"),
+                                   model=(response or {}).get("model") or job["model"],
+                                   worker_id=(response or {}).get("thread_id"), error=(response or {}).get("error"),
+                                   output=(response or {}).get("answer"))
+
+
+def literal_tool_requests(source):
+    """Read literal tool arguments and indexed Promise batches; never run JS."""
+    literal = re.compile(r'''//[^\n]*|/\*[\s\S]*?\*/|"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|`(?:\\.|[^`\\])*`''')
+    strings = list(literal.finditer(source))
+    masked = literal.sub(lambda match: " " * len(match[0]), source)
+    calls = list(re.finditer(r"\btools\.(\w+)\s*\(", masked))
+    batches = list(re.finditer(r"Promise\.(?:all|allSettled)\s*\(\s*\[", masked))
+    batch_start, batch_end = -1, -1
+    if len(batches) == 1:
+        batch_start = batches[0].end()
+        depth = 1
+        for at in range(batch_start, len(masked)):
+            depth += (masked[at] == "[") - (masked[at] == "]")
+            if depth == 0:
+                batch_end = at
+                break
+    # Result indices refer to array entries, not the number of tool calls.
+    # Count non-tool entries too, and decline entries with nested/multiple calls.
+    entries = []
+    if batch_end >= 0:
+        start, nesting = batch_start, 0
+        for at in range(batch_start, batch_end):
+            char = masked[at]
+            nesting += (char in "([{") - (char in ")]}")
+            if char == "," and nesting == 0:
+                entries.append((start, at))
+                start = at + 1
+        entries.append((start, batch_end))
+        if any(masked[left:right].lstrip().startswith("...") for left, right in entries):
+            entries = []
+    requests = []
+    for match in calls:
+        index = None if len(calls) == 1 and not batches else -1
+        for position, (left, right) in enumerate(entries):
+            if left <= match.start() < right and sum(left <= call.start() < right for call in calls) == 1:
+                prefix = masked[left:match.start()].strip()
+                if prefix in ("", "await"):
+                    index = position
+                break
+        start = match.end()
+        while start < len(masked) and masked[start].isspace():
+            start += 1
+        if start >= len(masked) or masked[start] != "{":
+            requests.append((match[1], None, index))
+            continue
+        depth, end, depths = 0, start, {}
+        for end in range(start, len(masked)):
+            depths[end] = depth
+            depth += (masked[end] == "{") - (masked[end] == "}")
+            if depth == 0:
+                break
+        body = source[start:end+1]
+        pattern = r'''(?:\bcmd\b|"cmd"|'cmd')\s*:\s*("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*')(?=\s*[,}])''' if match[1] == "exec_command" else r'''(?:\bsession_id\b|"session_id"|'session_id')\s*:\s*(\d+)(?=\s*[,}])'''
+        value = None
+        for field in re.finditer(pattern, body):
+            at = start + field.start()
+            if depths.get(at) != 1:
+                continue
+            if any(token.start() < at < token.end() for token in strings):
+                continue
+            try:
+                value = ast.literal_eval(field[1])
+            except (SyntaxError, ValueError):
+                pass
+            break
+        requests.append((match[1], value, index))
+    return requests
+
+
+def command_outputs(text):
+    """Skip nested foreign results after decoding an indexed output envelope."""
+    if not isinstance(text, str):
+        return
+    decoder, at = json.JSONDecoder(), 0
+    while (at := text.find("{", at)) >= 0:
+        try:
+            obj, length = decoder.raw_decode(text[at:])
+        except ValueError:
+            at += 1
+            continue
+        at += length
+        if not isinstance(obj, dict):
+            continue
+        index = obj.get("i") if type(obj.get("i")) is int else None
+        value = obj.get("value") if index is not None else obj
+        if isinstance(value, dict) and "output" in value:
+            yield index, value
 
 
 def read_literal_object(source):
@@ -614,12 +703,13 @@ class Collector:
                     if owner == self.root_id:
                         continue
                     detail = self.reader(row["rollout_path"]) if row.get("rollout_path") else {}
-                    if detail.get("error"):
-                        errors.append(f"{row.get('agent_nickname') or owner[:8]} 日志不可读")
                     turn = turns.get(owner)
                     status = turn_state(turn, launched_at=self.launched_at) if turn else detail.get("status", "unknown")
                     if row.get("edge_status") == "closed" and status == "running":
                         status = "unknown"
+                    visible = status not in ("completed", "failed") or (options or {}).get("agents_show_" + ("completed" if status == "completed" else "failed"), False)
+                    if detail.get("error") and visible:
+                        errors.append(f"{row.get('agent_nickname') or owner[:8]} 日志不可读")
                     agents.append({"id": owner, "parent": row.get("parent"),
                                    "name": row.get("agent_nickname") or row.get("agent_path") or owner[:8],
                                    "nickname": row.get("agent_nickname"), "model": row.get("model") or detail.get("model"),
@@ -628,6 +718,8 @@ class Collector:
                                    "ended": (turn or {}).get("completed_at") or detail.get("ended"),
                                    "duration": (turn["duration_ms"] / 1000 if turn and turn.get("duration_ms") is not None else detail.get("duration"))})
                     agents[-1]["usage"] = detail.get("usage")
+                    if detail.get("error"):
+                        agents[-1]["log_error"] = detail["error"]
                 agents_known = state is not None
             except (sqlite3.Error, OSError, ValueError) as error:
                 errors.append(f"数据源不可用: {error}")
