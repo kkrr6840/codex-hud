@@ -458,7 +458,7 @@ diagnostic.write_text(f'{stamp} INFO thread_spawn{{thread_id={root}}}:session_in
   const fakeCli = path.join(work, '官方界面替身.cjs');
   fs.writeFileSync(fakeCli, `
 process.stdin.setRawMode(true);process.stdin.setEncoding('utf8');let draft='';
-function draw(){process.stdout.write('\\x1b[?2026h\\x1b[2J\\x1b[Hfixture-ready '+process.stdout.columns+'x'+process.stdout.rows+'\\x1b[10;1H› '+(draft||'\\x1b[2mAsk Codex to do anything\\x1b[0m')+'\\x1b[10;'+(3+draft.length)+'H\\x1b[?25h\\x1b[?2026l');}
+function draw(){process.stdout.write('\\x1b[?2026h\\x1b[2J\\x1b[Hfixture-ready '+process.stdout.columns+'x'+process.stdout.rows+'\\x1b[3;1HWorking (4m 51s)\\x1b[10;1H› '+(draft||'\\x1b[2mAsk Codex to do anything\\x1b[0m')+'\\x1b[10;'+(3+draft.length)+'H\\x1b[?25h\\x1b[?2026l');}
 draw();process.stdout.on('resize',draw);
 process.stdin.on('data',data=>{const text=data.replace(/\\x1b(?:\\[[0-?]*[ -/]*[@-~]|O[@-~])/g,'');for(const char of text){if(char==='\\r'){if(draft==='/quit')process.exit(0);draft='';}else if(char==='\\x7f')draft=draft.slice(0,-1);else if(char>=' ')draft+=char;}draw();});
 `);
@@ -504,6 +504,23 @@ process.stdin.on('data',data=>{const text=data.replace(/\\x1b(?:\\[[0-?]*[ -/]*[
     assert.deepEqual(fs.readFileSync(childLog), beforeLog, 'viewing details never changes or resumes the child session');
     outer.write('\x1b'); await until(selected, 'first Esc returned to actual HUD');
     outer.write('\x1b'); await wait(100);
+    await until(() => visible().includes('Working (4m 51s)') && !selected(), 'returned to the frozen official fixture');
+    const history = spawnSync(python, ['-c', `
+import sqlite3,sys,time
+from pathlib import Path
+db=sqlite3.connect(Path(sys.argv[1])/'thread_history_1.sqlite')
+db.executescript('CREATE TABLE thread_turns(thread_id TEXT,turn_id TEXT,rollout_ordinal INTEGER,status TEXT,started_at INTEGER,completed_at INTEGER,duration_ms INTEGER);CREATE TABLE thread_items(thread_id TEXT,item_type TEXT,item_json TEXT,rollout_ordinal INTEGER,updated_at_ordinal INTEGER);')
+db.execute('INSERT INTO thread_turns VALUES(?,?,?,?,?,?,?)',(sys.argv[2],'clock-turn',1,'inProgress',int(time.time())+1,None,None))
+db.commit();db.close()
+`, home, root], { env: environment, encoding: 'utf8' });
+    assert.equal(history.status, 0, history.stderr);
+    await until(() => /本轮 \d+s/u.test(visible()), 'independent turn clock became visible');
+    const firstSeconds = Number(visible().match(/本轮 (\d+)s/u)[1]);
+    const dataEvents = () => (readFixture(path.join(runtime, 'native.log')).match(/cli data bytes=/g) || []).length;
+    const beforeEvents = dataEvents();
+    await until(() => Number(visible().match(/本轮 (\d+)s/u)?.[1] ?? -1) >= firstSeconds + 2, 'HUD clock ticked without official redraw or key input');
+    assert.ok(visible().includes('Working (4m 51s)'), 'official fixture remained frozen');
+    assert.equal(dataEvents(), beforeEvents, 'no CLI bytes were required for HUD clock updates');
     outer.write('/quit\r'); await until(() => exited, 'quit closed real bridge integration', 10000);
     assert.equal(exitCode, 0); assert.equal(fs.existsSync(runtime), false);
     await until(() => [runner.pid, runner.bridge_pid].every(pid => { try { process.kill(pid, 0); return false; } catch { return true; } }), 'official fixture and Python bridge stopped');

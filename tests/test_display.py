@@ -37,6 +37,30 @@ class DisplayTest(unittest.TestCase):
         context = next(row for row in render_rows(snapshot) if "上下文" in row.text)
         self.assertTrue(any("█" in text and kind == "bad" for text, kind in context.spans))
 
+    def test_turn_clock_ticks_without_tool_events_and_resets_for_the_next_turn(self):
+        snapshot = self.snapshot()
+        snapshot["root"].update(status="running", started=1000)
+        snapshot["time"] = 1291
+        self.assertIn("本轮 4m51s", "\n".join(row.text for row in render_rows(snapshot)))
+        snapshot["time"] += 1
+        self.assertIn("本轮 4m52s", "\n".join(row.text for row in render_rows(snapshot)))
+        snapshot["time"] = 4601
+        self.assertIn("本轮 1h00m01s", "\n".join(row.text for row in render_rows(snapshot)))
+        snapshot["root"]["started"] = 4600
+        self.assertIn("本轮 1s", "\n".join(row.text for row in render_rows(snapshot)))
+        snapshot["root"]["status"] = "idle"
+        self.assertNotIn("本轮", "\n".join(row.text for row in render_rows(snapshot)))
+
+    def test_turn_clock_preserves_unknown_start_times_and_can_be_hidden(self):
+        snapshot = self.snapshot()
+        snapshot["root"]["status"] = "running"
+        for start in (None, 0, True, "1", 101, float('nan'), float('inf')):
+            snapshot["root"]["started"] = start
+            self.assertNotIn("本轮", "\n".join(row.text for row in render_rows(snapshot)))
+        snapshot["root"]["started"] = 99
+        config = {**DEFAULT, "show": {**DEFAULT["show"], "turn_duration": False}}
+        self.assertNotIn("本轮", "\n".join(row.text for row in render_rows(snapshot, config=config)))
+
     def test_source_errors_remain_visible_and_failed_usage_is_available_on_request(self):
         snapshot = self.snapshot()
         snapshot["errors"] = ["会话日志不可读"]

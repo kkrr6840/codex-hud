@@ -9,7 +9,7 @@ from pathlib import Path
 import re
 
 ELEMENTS = {
-    "model": "模型", "effort": "推理力度", "status": "运行状态",
+    "model": "模型", "effort": "推理力度", "status": "运行状态", "turn_duration": "本轮耗时（含等待）",
     "project": "项目路径", "git": "Git", "provider": "提供商",
     "session_name": "会话名称", "version": "CLI 版本", "context": "上下文",
     "quota_5h": "5 小时额度", "quota_weekly": "每周额度", "quota_other": "其他额度窗口",
@@ -24,8 +24,8 @@ SECTIONS = ["header", "context", "quota", "tokens", "cache", "skills", "tools", 
 DEFAULT = {
     "language": "zh-Hans", "layout": "expanded", "separators": True,
     "height": 11, "max_width": 0, "path_levels": 2,
-    "show": {key: key in {"model", "effort", "status", "project", "git", "context", "quota_5h", "quota_weekly", "quota_other", "tokens", "cache", "skills", "tools", "mcp", "agents", "todos", "offload"} for key in ELEMENTS},
-    "order": SECTIONS, "header_order": ["model", "status", "project", "git", "provider", "session_name", "version"],
+    "show": {key: key in {"model", "effort", "status", "turn_duration", "project", "git", "context", "quota_5h", "quota_weekly", "quota_other", "tokens", "cache", "skills", "tools", "mcp", "agents", "todos", "offload"} for key in ELEMENTS},
+    "order": SECTIONS, "header_order": ["model", "status", "turn_duration", "project", "git", "provider", "session_name", "version"],
     "merge_groups": [["context", "quota"], ["tokens", "cache"]], "right_align": [],
     "context_value": "both", "context_bar": True, "context_window": None,
     "quota_style": "bar", "quota_value": "remaining", "reset_format": "both",
@@ -145,12 +145,12 @@ def save(changes):
 
 def preset(name):
     if name == "focus":
-        visible = {"status", "git", "context", "quota_5h", "quota_weekly", "quota_other", "tokens", "cache", "skills", "tools", "mcp", "agents", "todos", "offload"}
+        visible = {"status", "turn_duration", "git", "context", "quota_5h", "quota_weekly", "quota_other", "tokens", "cache", "skills", "tools", "mcp", "agents", "todos", "offload"}
         return {"show": {key: key in visible for key in ELEMENTS}, "layout": "compact", "cache_style": "text",
                 "order": ["header", "skills", "context", "quota", "tokens", "cache", "tools", "mcp", "agents", "todos", "offload", "session", "environment", "memory", "custom"],
                 "merge_groups": [["context", "quota"], ["tokens", "cache"], ["header", "skills"]]}
     minimum = {"model", "project", "git", "context", "quota_5h", "quota_weekly"}
-    standard = minimum | {"effort", "status", "cache", "skills", "tools", "mcp", "agents", "todos", "offload"}
+    standard = minimum | {"effort", "status", "turn_duration", "cache", "skills", "tools", "mcp", "agents", "todos", "offload"}
     visible = minimum if name == "minimal" else standard if name == "standard" else set(ELEMENTS)
     return {"show": {key: key in visible for key in ELEMENTS}, "layout": "compact" if name == "minimal" else "expanded"}
 

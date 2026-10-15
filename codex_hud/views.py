@@ -58,8 +58,10 @@ class View:
 
     def header(self):
         r, show, cfg, git = self.root, self.show, self.c, self.s["git"]
+        started = r.get("started")
+        turn_clock = show["turn_duration"] and r.get("status") == "running" and type(started) in (int, float) and math.isfinite(started) and 0 < started <= self.now
         # A directory or optional label alone must not reveal an empty session.
-        if not any((r.get("model"), r.get("usage"), r.get("context_used"), git.get("branch"))):
+        if not any((r.get("model"), r.get("usage"), r.get("context_used"), git.get("branch"), turn_clock)):
             return
         parts = {}
         if show["model"] and r.get("model"):
@@ -75,6 +77,10 @@ class View:
         if show["status"] and r.get("status"):
             state = r["status"]
             parts["status"] = [(ICONS.get(state, "?") + " " + self.state(state), STATE_COLOR.get(state, "muted"))]
+        if turn_clock:
+            seconds = int(self.now-started)
+            duration = f"{seconds // 3600}h{seconds % 3600 // 60:02}m{seconds % 60:02}s" if seconds >= 3600 else elapsed({"duration": seconds}, self.now)
+            parts["turn_duration"] = [(self.tr("本轮 ", "Turn ", "本輪 ") + duration, "muted")]
         if show["project"] and r.get("cwd"):
             cwd = str(r["cwd"])
             home = str(Path.home())
