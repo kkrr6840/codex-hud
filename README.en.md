@@ -27,6 +27,8 @@ v0.7.2 adds an independent running-turn clock that updates each second from the 
 
 v0.7.4 fixes missing text after full, nearly full, or empty bars in the macOS panel. Quota percentages and reset times remain visible at those boundaries.
 
+v0.7.9 reduces overhead in long sessions and multiple windows. Tool history uses separate indexed ranges for new and updated records instead of repeatedly scanning old items. The macOS panel recomputes layout only after snapshot, size or input changes and batches geometry queries into one tmux call. Preferences and turn clocks still update about once a second; active Mac observers can refresh in place. These changes do not establish a terminal scrolling frame-rate guarantee.
+
 Windows v0.7.1 recognizes the official npm platform-package aliases and records the exact Python interpreter used for setup. The launcher uses that executable directly instead of PATH's `python`, `py`, batch shims, or application aliases. If it becomes unavailable, the launcher warns before falling back to the official CLI. Existing Windows installations must run the hud skill's automatic setup once after upgrading to replace their generated `codex.cmd`.
 
 ## Requirements

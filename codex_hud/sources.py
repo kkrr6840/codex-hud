@@ -672,7 +672,21 @@ class Collector:
                                 self.skill_turn = current_turn.get("turn_id")
                                 self.skill_reads = []
                         watermark = self.watermarks.get(owner, -1)
-                        for row in history.execute("SELECT * FROM thread_items WHERE thread_id=? AND item_type IN ('collabAgentToolCall','commandExecution') AND (rollout_ordinal>? OR updated_at_ordinal>?) ORDER BY rollout_ordinal", (owner, watermark, watermark)):
+                        # Separate the two indexed ranges. An OR here can make
+                        # SQLite scan every old item in this thread each tick.
+                        query = """SELECT * FROM thread_items
+                            WHERE thread_id=? AND item_type IN ('collabAgentToolCall','commandExecution') AND rollout_ordinal>?
+                            UNION
+                            SELECT * FROM thread_items
+                            WHERE thread_id=? AND item_type IN ('collabAgentToolCall','commandExecution') AND updated_at_ordinal>?
+                            ORDER BY rollout_ordinal"""
+                        parameters = (owner, watermark, owner, watermark)
+                        if watermark < 0:
+                            # The initial scan needs all history only once; do
+                            # not load and deduplicate the same old rows twice.
+                            query = "SELECT * FROM thread_items WHERE thread_id=? AND item_type IN ('collabAgentToolCall','commandExecution') AND (rollout_ordinal>? OR updated_at_ordinal>?) ORDER BY rollout_ordinal"
+                            parameters = (owner, watermark, watermark)
+                        for row in history.execute(query, parameters):
                             self.watermarks[owner] = max(self.watermarks.get(owner, -1), row["rollout_ordinal"], row["updated_at_ordinal"])
                             if row["item_type"] == "collabAgentToolCall":
                                 item = json.loads(row["item_json"])

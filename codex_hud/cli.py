@@ -347,10 +347,12 @@ def sync_layout(spec, snapshot):
     if not spec.get("hud"):
         return False
     socket = spec["socket"]
-    main = tmux(socket, "display-message", "-p", "-t", spec["top"],
-                "#{window_id} #{window_height} #{window_width} #{window_zoomed_flag}", check=False).stdout.split()
-    panel_info = tmux(socket, "display-message", "-p", "-t", spec["hud"],
-                      "#{window_id} #{pane_height}", check=False).stdout.split()
+    geometry = tmux(socket, "display-message", "-p", "-t", spec["top"],
+                    "#{window_id} #{window_height} #{window_width} #{window_zoomed_flag}", ";",
+                    "display-message", "-p", "-t", spec["hud"], "#{window_id} #{pane_height}", check=False).stdout.splitlines()
+    if len(geometry) != 2:
+        return False
+    main, panel_info = (line.split() for line in geometry)
     if len(main) != 4 or len(panel_info) != 2:
         return False
     rows = render_rows(snapshot, int(main[2]))
@@ -388,6 +390,7 @@ def panel(runtime):
         init_colors(config)
         scroll, refresh, snapshot, expanded = 0, 0, None, False
         frame_cache = {}
+        last_paint = None
         while True:
             if (runtime / "exit.json").exists():
                 break
@@ -491,7 +494,10 @@ def panel(runtime):
                     view = snapshot
             else:
                 view = snapshot
-            scroll = paint(screen, view, scroll, expanded, selected, frame_cache)
+            paint_state = (id(snapshot), screen.getmaxyx(), scroll, expanded, selected)
+            if key != -1 or paint_state != last_paint:
+                scroll = paint(screen, view, scroll, expanded, selected, frame_cache)
+                last_paint = (id(snapshot), screen.getmaxyx(), scroll, expanded, selected)
             time.sleep(0.1)
     try:
         curses.wrapper(ui)

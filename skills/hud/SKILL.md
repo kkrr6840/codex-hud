@@ -35,6 +35,8 @@ When the display is nested inside another private HUD belonging to this plugin, 
 
 That code-refresh command applies to macOS tmux HUDs. Native Windows backend upgrades take effect on the next normal launch. Display preferences refresh live on both platforms. Windows supports `watch --session <ID> --once` for read-only data verification, without a curses viewer.
 
+For performance checks, measure observer processes separately from cleanup watchers, tmux, the official CLI and the terminal app. v0.7.9 uses indexed new/updated history queries and avoids repeated idle layout computation. Clock/config updates remain about one second. Report measured CPU or collection latency with the sample size; do not treat those as proof of smooth scrolling or absent visual cursor artifacts.
+
 Quotas come from official current-thread rate-limit snapshots, not estimates from tokens. The 5-hour or weekly row stays hidden when its window is absent. Main-thread usage never adds native agent or relay usage. Relay failures without a returned usage record show unavailable, not zero. Cost totals, API tok/s, cache expiry, and continuous Skill execution state lack reliable Codex telemetry; read skill instructions are shown separately, without inventing those values or reading credentials.
 
 ## Automatic launch integration

@@ -8,10 +8,36 @@ import unittest
 from unittest.mock import patch
 
 from codex_hud.display import clean, elapsed, lines
-from codex_hud.sources import Collector, Diagnostic, Rollout, offload_job, turn_state, response_json, literal_tool_requests
+from codex_hud.sources import Collector, Diagnostic, Rollout, offload_job, turn_state, response_json, literal_tool_requests, database
 
 
 class SourcesTest(unittest.TestCase):
+    def test_unchanged_large_tool_history_uses_incremental_index_ranges(self):
+        self.thread("root-A")
+        self.history.executescript("CREATE UNIQUE INDEX item_page ON thread_items(thread_id,rollout_ordinal); CREATE INDEX item_updated ON thread_items(thread_id,updated_at_ordinal);")
+        item = json.dumps({"command": "echo ordinary-check", "status": "completed"})
+        self.history.executemany("INSERT INTO thread_items VALUES(?,?,?,?,?,?,?,?,?)", [("root-A",str(i),"commandExecution",item,i,i,100000,None,None) for i in range(2,5002)])
+        self.history.commit()
+        collector = Collector(home=self.home, root_id="root-A")
+        collector.collect()
+        steps = []
+        def record_steps():
+            steps.append(1)
+            return 0
+        def tracked(home, prefix):
+            connection = database(home, prefix)
+            if prefix == "thread_history":
+                connection.set_progress_handler(record_steps, 100)
+            return connection
+        with patch("codex_hud.sources.database", tracked):
+            snapshot = collector.collect()
+        self.assertEqual(snapshot["offload"]["jobs"], [])
+        self.assertLess(len(steps), 10, "unchanged history should not scan thousands of old tool rows")
+        self.job("root-A", "new-relay", usage={"input_tokens": 42}, ordinal=5002)
+        jobs = collector.collect()["offload"]["jobs"]
+        self.assertEqual(len(jobs), 1)
+        self.assertEqual(jobs[0]["usage"]["input_tokens"], 42)
+
     def test_skill_reads_are_current_turn_only_and_never_include_children_or_other_sessions(self):
         self.thread("root")
         self.thread("child", "root")
