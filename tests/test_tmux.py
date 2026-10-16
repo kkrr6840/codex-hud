@@ -200,6 +200,49 @@ f.close()
         self.assert_auto_launch(terminal="tmux-256color")
 
     @unittest.skipUnless(sys.platform == "darwin", "macOS BSD script PTY test")
+    def test_refresh_old_nested_client_preserves_draft_cursor_and_cli_process(self):
+        self.env["HUD_TEST_COMPOSER"] = "1"
+        spec = self.launch()
+        # Reproduce an existing client attached before sync support was set.
+        self.tmux(spec, "set-option", "-s", "terminal-features", "")
+        output_path = self.base / "old-terminal-output.log"
+        output = output_path.open("wb")
+        proc = subprocess.Popen(["/usr/bin/script", "-q", "/dev/null", "tmux", "-L", spec["socket"], "attach-session", "-t", "codex"],
+                                cwd=self.base, env=dict(self.env, TERM="tmux-256color"), stdin=subprocess.PIPE, stdout=output, stderr=subprocess.STDOUT)
+        self.pty_children.append((proc, output))
+        self.wait_for(lambda: self.tmux(spec, "list-clients", "-F", "#{client_name}").stdout.strip())
+        self.assertNotIn("sync", self.tmux(spec, "list-clients", "-F", "#{client_termfeatures}").stdout.split(","))
+        self.wait_for(lambda: self.snapshot(spec).get("root", {}).get("id"))
+        draft = "draft cursor 中"
+        proc.stdin.write(draft.encode()); proc.stdin.flush()
+        self.wait_for(lambda: draft in self.tmux(spec, "capture-pane", "-p", "-t", spec["top"]).stdout)
+        cursor_format = "#{cursor_x},#{cursor_y}"
+        before_cursor = self.tmux(spec, "display-message", "-p", "-t", spec["top"], cursor_format).stdout
+        before_pid = self.tmux(spec, "display-message", "-p", "-t", spec["top"], "#{pane_pid}").stdout
+        before_runner = json.loads((Path(spec["runtime"])/"runner.json").read_text())["pid"]
+        result = subprocess.run([sys.executable, str(ENTRY), "refresh", "--session", self.snapshot(spec)["root"]["id"]],
+                                env=self.env, capture_output=True, text=True, timeout=15)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(len(json.loads(result.stdout)["updated"][0]["reconnected_clients"]), 1)
+        self.assertIn("sync", self.tmux(spec, "list-clients", "-F", "#{client_termfeatures}").stdout.strip().split(","))
+        self.assertEqual(self.tmux(spec, "display-message", "-p", "-t", spec["top"], "#{pane_pid}").stdout, before_pid)
+        self.assertEqual(json.loads((Path(spec["runtime"])/"runner.json").read_text())["pid"], before_runner)
+        self.assertEqual(self.tmux(spec, "display-message", "-p", "-t", spec["top"], cursor_format).stdout, before_cursor)
+        self.assertIn(draft, self.tmux(spec, "capture-pane", "-p", "-t", spec["top"]).stdout)
+        offset = output_path.stat().st_size
+        # A background HUD frame must now be wrapped in a synchronized update.
+        rollout = next((self.base / "home/sessions").glob("*.jsonl"))
+        with rollout.open("a") as handle:
+            handle.write(json.dumps({"type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":40}}}})+"\n")
+        self.wait_for(lambda: b"\x1b[?2026h" in output_path.read_bytes()[offset:] and b"\x1b[?2026l" in output_path.read_bytes()[offset:])
+        self.assertEqual(self.tmux(spec, "display-message", "-p", "-t", spec["top"], cursor_format).stdout, before_cursor)
+        proc.stdin.write(b"Z"); proc.stdin.flush()
+        self.wait_for(lambda: draft+"Z" in self.tmux(spec, "capture-pane", "-p", "-t", spec["top"]).stdout)
+        self.assertIsNone(proc.poll())
+        proc.stdin.write(b"\nquit\n"); proc.stdin.flush()
+        self.wait_for(lambda: not Path(spec["runtime"]).exists())
+
+    @unittest.skipUnless(sys.platform == "darwin", "macOS BSD script PTY test")
     def test_agent_popup_navigates_live_output_without_restarting_cli(self):
         self.assert_auto_launch(inspect_agents=True)
 

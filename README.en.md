@@ -137,7 +137,7 @@ Quota bars use official rate-limit snapshots received by the current thread. The
 
 Codex HUD uses a private tmux session on macOS and a native ConPTY terminal host on Windows. Both launch the official CLI with `--no-daemon` and a private diagnostic directory. Non-interactive commands, help/version queries, redirected output, and remote sessions pass through to the official CLI. CLI approval and network policies still apply.
 
-Starting with v0.4.2, the private server enables synchronized updates for an outer tmux terminal and uses an explicit steady cursor in the CLI pane. This reduces visible cursor hide/show transitions in nested tmux sessions. Refresh applies the steady cursor immediately; tmux reads terminal capabilities when a client connects, so the synchronized-update declaration applies on the next normal entry for an already attached client.
+Starting with v0.4.2, the private server enables synchronized updates for an outer tmux terminal and uses an explicit steady cursor in the CLI pane. Starting with v0.7.5, refresh replaces an old nested display connection when its cached capabilities still lack synchronized updates. The CLI, session, typed draft and cursor position remain intact; the screen may briefly redraw once without reopening the conversation. Already synchronized, read-only, control-mode and suspended clients are not reconnected automatically.
 
 ## Disable or remove
 

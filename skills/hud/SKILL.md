@@ -29,7 +29,7 @@ Preferences live in `~/.config/codex-hud/display.json`. Optional `override.json`
 
 Text cache percentage merged with tokens is the default, including upgrades without an explicit cache preference. Preserve explicit `cache_style="bar"` and custom merge groups. Do not overwrite old style preferences merely to apply the new default.
 
-After a plugin update, an active HUD may still run the old code. `python3 <plugin-root>/codex-hud refresh --session <current-thread-id>` replaces only its observer and bindings. Check the returned runtime and retained CLI PID; do not restart or stop the main conversation.
+After a plugin update, an active HUD may still run the old code. `python3 <plugin-root>/codex-hud refresh --session <current-thread-id>` replaces its observer and bindings. If an old writable nested tmux display client still lacks synchronized updates, refresh also replaces that display connection so cached capabilities take effect. This may briefly redraw the screen; the CLI, draft and conversation remain running. Check the returned runtime, retained CLI PID and `reconnected_clients`. Already synchronized, read-only, control-mode and suspended clients are not reconnected automatically. Do not restart or stop the main conversation.
 
 That code-refresh command applies to macOS tmux HUDs. Native Windows backend upgrades take effect on the next normal launch. Display preferences refresh live on both platforms. Windows supports `watch --session <ID> --once` for read-only data verification, without a curses viewer.
 

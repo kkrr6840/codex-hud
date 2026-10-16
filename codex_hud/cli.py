@@ -69,6 +69,40 @@ def configure_terminal(spec):
         tmux(socket, "set-option", "-s", f"terminal-features[{max(indices, default=-1) + 1}]", "tmux*:sync")
 
 
+def reconnect_unsynced_clients(spec):
+    """Apply newly configured capabilities to old nested terminal clients.
+
+    tmux caches these when a client attaches. Replacing only that client keeps
+    the CLI PTY, draft, processes and session alive; no keys are injected.
+    """
+    socket = spec["socket"]
+    fields = "#{client_name}\t#{client_termname}\t#{client_termfeatures}\t#{client_session}\t#{client_readonly}\t#{client_control_mode}\t#{client_flags}"
+    clients = tmux(socket, "list-clients", "-F", fields).stdout.splitlines()
+    updated = []
+    for line in clients:
+        values = line.split("\t")
+        if len(values) != 7:
+            continue
+        name, terminal, features, session, readonly, control, flags = values
+        if not terminal.startswith("tmux") or "sync" in features.split(",") or readonly != "0" or control != "0" or not session or "suspended" in flags.split(","):
+            continue
+        argv = [shutil.which("tmux"), "-L", socket, "-T", "sync", "attach-session", "-t", session]
+        saved_flags = [flag for flag in flags.split(",") if flag in ("active-pane", "ignore-size", "no-output", "wait-exit") or re.fullmatch(r"pause-after=\d+", flag)]
+        if saved_flags:
+            argv += ["-f", ",".join(saved_flags)]
+        attach = shlex.join(argv)
+        tmux(socket, "detach-client", "-t", name, "-E", "exec " + attach)
+        for _ in range(40):
+            current = tmux(socket, "list-clients", "-F", "#{client_name}\t#{client_termfeatures}").stdout.splitlines()
+            if any(row.split("\t", 1)[0] == name and "sync" in row.split("\t", 1)[-1].split(",") for row in current):
+                updated.append(name)
+                break
+            time.sleep(.05)
+        else:
+            raise RuntimeError("终端显示连接未恢复；主 CLI 和会话仍保留")
+    return updated
+
+
 def bind_agents(spec):
     popup = ("display-popup", "-E", "-w", "90%", "-h", "85%", command("_agents", spec["runtime"], runtime=spec["runtime"]))
     tmux(spec["socket"], "bind-key", "Down", *popup)
@@ -510,10 +544,11 @@ def refresh_panels(argv):
         tmux(socket, "bind-key", "H", "run-shell", command("_toggle", runtime, runtime=runtime))
         tmux(socket, "bind-key", "C", "display-popup", "-E", "-w", "85%", "-h", "85%", command("config", "--menu", runtime=runtime))
         bind_agents(spec)
+        reconnected = reconnect_unsynced_clients(spec)
         after = tmux(socket, "display-message", "-p", "-t", spec["top"], "#{pane_pid}").stdout.strip()
         if before != after:
             raise RuntimeError("CLI pane identity changed while refreshing HUD")
-        updated.append({"runtime": str(runtime), "cli_pid": before})
+        updated.append({"runtime": str(runtime), "cli_pid": before, "reconnected_clients": reconnected})
     print(json.dumps({"updated": updated}, ensure_ascii=False))
     return 0 if updated else 1
 

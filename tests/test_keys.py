@@ -7,8 +7,40 @@ import unittest
 from unittest.mock import patch
 
 from codex_hud.keys import clear, down, empty_composer
+from codex_hud.cli import reconnect_unsynced_clients
 
 EMPTY = "\x1b[1m\x1b[48;2;30;30;30m›\x1b[0m\x1b[48;2;30;30;30m \x1b[2mAsk Codex to do anything\x1b[0m\n"
+
+
+class TerminalRefreshTest(unittest.TestCase):
+    def test_only_old_writable_nested_clients_reconnect_and_repeat_is_a_noop(self):
+        calls, refreshed = [], False
+        def tmux(socket, *args):
+            nonlocal refreshed
+            calls.append(args)
+            if args[0] == "detach-client":
+                refreshed = True
+                result = ""
+            elif args[-1] == "#{client_name}\t#{client_termfeatures}":
+                result = "/dev/tty-old\tRGB,sync\n"
+            else:
+                result = "\n".join([
+                    f"/dev/tty-old\ttmux-256color\tRGB{',sync' if refreshed else ''}\tcodex\t0\t0\tattached,UTF-8,ignore-size",
+                    "/dev/tty-direct\txterm-256color\tRGB\tcodex\t0\t0\tattached",
+                    "/dev/tty-ready\ttmux-256color\tsync\tcodex\t0\t0\tattached",
+                    "/dev/tty-readonly\ttmux-256color\tRGB\tcodex\t1\t0\tattached,read-only",
+                    "/dev/tty-control\ttmux-256color\tRGB\tcodex\t0\t1\tcontrol-mode",
+                    "/dev/tty-suspended\ttmux-256color\tRGB\tcodex\t0\t0\tattached,suspended",
+                ])
+            return subprocess.CompletedProcess(args, 0, result)
+        with patch("codex_hud.cli.tmux", side_effect=tmux), patch("codex_hud.cli.shutil.which", return_value="/tools with spaces/tmux"):
+            self.assertEqual(reconnect_unsynced_clients({"socket": "private-hud"}), ["/dev/tty-old"])
+            self.assertEqual(reconnect_unsynced_clients({"socket": "private-hud"}), [])
+        detached = [args for args in calls if args[0] == "detach-client"]
+        self.assertEqual(len(detached), 1)
+        self.assertEqual(detached[0][1:3], ("-t", "/dev/tty-old"))
+        self.assertEqual(detached[0][4], "exec '/tools with spaces/tmux' -L private-hud -T sync attach-session -t codex -f ignore-size")
+        self.assertFalse(any(args[0] in ("send-keys", "kill-server", "kill-session", "respawn-pane") for args in calls))
 
 
 class KeysTest(unittest.TestCase):
