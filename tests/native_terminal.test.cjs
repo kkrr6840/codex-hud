@@ -105,6 +105,64 @@ test('empty Down selects in HUD, arrows move, Enter requests detail and two Esc 
   assert.equal(controller.mode, 'cli');
 });
 
+test('config waits for matching success, prevents duplicates and retries failures', () => {
+  const requests = [], controller = new hud.HudController(request => requests.push(request));
+  controller.update(packet()); controller.enterHud();
+  const press = (name, raw = '') => controller.input(input(raw, name), false);
+  const f8 = new hud.InputDecoder().push(`${CSI}19~`)[0];
+  assert.equal(controller.input(f8, false).consumed, true);
+  for (let i = 0; i < 3; i++) press('down');
+  assert.equal(press('enter').consumed, true);
+  const first = requests[0];
+  assert.equal(first.changes.preset, 'focus');
+  assert.match(controller.overlayLines(12, 80).join('\n'), /Applying/);
+  assert.equal(press('enter').consumed, true);
+  press('up');
+  assert.equal(requests.length, 1); assert.equal(controller.configIndex, 3);
+  controller.update(packet());
+  controller.update({ type: 'config', request_id: first.request_id + 1 });
+  assert.equal(controller.pendingConfig, first.request_id);
+  controller.update({ ...first, error: 'disk full' });
+  assert.equal(controller.mode, 'config'); assert.equal(controller.pendingConfig, null);
+  assert.match(controller.overlayLines(12, 80).join('\n'), /disk full/);
+  press('enter');
+  assert.equal(controller.configError, ''); assert.equal(requests.length, 2);
+  assert.notEqual(requests[1].request_id, first.request_id);
+  controller.update(first);
+  assert.equal(controller.mode, 'config');
+  controller.update(requests[1]);
+  assert.equal(controller.mode, 'cli'); assert.equal(controller.selected, null);
+  assert.equal(press('other', 'x').consumed, false);
+});
+
+test('config cancellation, reopen and root change reject late replies', () => {
+  const requests = [], controller = new hud.HudController(request => requests.push(request));
+  controller.update(packet());
+  const press = (name, raw = '') => controller.input(input(raw, name), false);
+  press('prefix', '\x02');
+  assert.deepEqual(press('config', `${CSI}19~`), { consumed: true });
+  assert.equal(controller.prefix, false);
+  press('escape');
+  for (const cancel of ['escape', 'config', 'root']) {
+    press('config'); press('down'); press('enter');
+    const old = requests.at(-1);
+    const selectedPreset = controller.configIndex;
+    if (cancel === 'root') controller.update(packet('root-b'));
+    else assert.equal(press(cancel).consumed, true);
+    assert.equal(controller.pendingConfig, null);
+    const mode = controller.mode;
+    controller.update({ ...old, error: 'late failure' });
+    assert.equal(controller.mode, mode); assert.equal(controller.configError, '');
+    if (mode === 'cli') { press('prefix', '\x02'); assert.equal(press('other', 'C').consumed, true); }
+    assert.equal(controller.configIndex, selectedPreset);
+    press('enter');
+    const current = requests.at(-1);
+    controller.update(old);
+    assert.equal(controller.mode, 'config'); assert.equal(controller.pendingConfig, current.request_id);
+    controller.update(current); assert.equal(controller.mode, 'cli');
+  }
+});
+
 test('Up from first agent returns to input; typing resumes native editing', () => {
   const controller = new hud.HudController(); controller.update(packet());
   controller.enterHud(); controller.input(input(`${CSI}A`, 'up'), false);
@@ -521,6 +579,25 @@ db.commit();db.close()
     await until(() => Number(visible().match(/本轮 (\d+)s/u)?.[1] ?? -1) >= firstSeconds + 2, 'HUD clock ticked without official redraw or key input');
     assert.ok(visible().includes('Working (4m 51s)'), 'official fixture remained frozen');
     assert.equal(dataEvents(), beforeEvents, 'no CLI bytes were required for HUD clock updates');
+    outer.write('saved-draft');
+    await until(() => visible().includes('› saved-draft'), 'draft exists before configuration');
+    outer.write(`${CSI}19~`);
+    await until(() => visible().includes('Codex HUD · configuration'), 'F8 opened configuration');
+    outer.write(`${CSI}B${CSI}B${CSI}B`);
+    await until(() => visible().includes('› focus'), 'focus selected');
+    outer.write('\r');
+    await until(() => !visible().includes('Codex HUD · configuration') && visible().includes('› saved-draft'), 'successful save closed menu and preserved draft');
+    const saved = JSON.parse(fs.readFileSync(path.join(config, 'display.json'), 'utf8'));
+    assert.equal(saved.layout, 'compact'); assert.equal(saved.cache_style, 'text');
+    assert.equal(saved.show.model, false); assert.equal(saved.show.agents, true);
+    assert.deepEqual(saved.merge_groups, [['context', 'quota'], ['tokens', 'cache'], ['header', 'skills']]);
+    const afterSave = JSON.parse(fs.readFileSync(path.join(runtime, 'runner.json'), 'utf8'));
+    assert.equal(afterSave.pid, runner.pid); assert.ok(hud.processAlive(runner.pid));
+    assert.equal(selected(), false);
+    outer.write('-continued');
+    await until(() => visible().includes('› saved-draft-continued'), 'same CLI continues editing preserved draft');
+    outer.write('\x7f'.repeat('saved-draft-continued'.length));
+    await until(() => visible().includes('› Ask Codex'), 'fixture draft cleared before quit');
     outer.write('/quit\r'); await until(() => exited, 'quit closed real bridge integration', 10000);
     assert.equal(exitCode, 0); assert.equal(fs.existsSync(runtime), false);
     await until(() => [runner.pid, runner.bridge_pid].every(pid => { try { process.kill(pid, 0); return false; } catch { return true; } }), 'official fixture and Python bridge stopped');

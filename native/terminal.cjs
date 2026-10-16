@@ -269,12 +269,14 @@ class HudController {
     this.prefix = false;
     this.configIndex = 0;
     this.configError = '';
+    this.pendingConfig = null;
   }
   update(packet) {
     if (packet.type === 'snapshot') {
       const root = rootId(packet.snapshot);
       if (root !== this.root) {
         this.mode = 'cli'; this.selected = null; this.scroll = 0;
+        this.pendingConfig = null; this.configError = '';
         this.pendingDetail = null; this.detailLines = []; this.detailOffset = 0;
       }
       this.root = root;
@@ -290,7 +292,17 @@ class HudController {
     } else if (packet.type === 'detail' && this.mode === 'detail' && packet.request_id === this.pendingDetail &&
       packet.root === this.root && keyId(packet.key) === keyId(this.selected)) {
       this.detailLines = packet.error ? [String(packet.error)] : (packet.lines || []).map(String);
-    } else if (packet.type === 'config') this.configError = packet.error ? String(packet.error) : '';
+    } else if (packet.type === 'config' && this.mode === 'config' &&
+      this.pendingConfig !== null && packet.request_id === this.pendingConfig) {
+      this.pendingConfig = null;
+      this.configError = packet.error ? String(packet.error) : '';
+      if (!this.configError) { this.mode = 'cli'; this.selected = null; }
+    }
+  }
+  openConfig() {
+    this.prefix = false;
+    this.mode = 'config'; this.selected = null; this.pendingDetail = null;
+    this.pendingConfig = null; this.configError = '';
   }
   selectable() { return this.allRows.filter(row => keyId(row.key)); }
   enterHud() {
@@ -304,19 +316,20 @@ class HudController {
     this.send({ type: 'detail', request_id: this.pendingDetail, root: this.root, key: this.selected });
   }
   input(token, empty) {
+    if (token.name === 'config') { this.openConfig(); return { consumed: true }; }
     if (this.prefix) {
       this.prefix = false;
       if (token.name === 'down') { const consumed = this.enterHud(); return { consumed, prepend: consumed ? '' : '\x02' }; }
-      if (token.raw === 'C') { this.mode = 'config'; return { consumed: true }; }
+      if (token.raw === 'C') { this.openConfig(); return { consumed: true }; }
       return { consumed: false, prepend: '\x02' };
     }
     if (token.name === 'prefix' && this.mode === 'cli') { this.prefix = true; return { consumed: true }; }
-    if (token.name === 'config') { this.mode = 'config'; return { consumed: true }; }
     if (this.mode === 'cli') {
       return { consumed: (token.name === 'altDown' || (token.name === 'down' && empty)) && this.enterHud() };
     }
-    if (token.name === 'interrupt') { this.mode = 'cli'; this.selected = null; return { consumed: false }; }
+    if (token.name === 'interrupt') { this.pendingConfig = null; this.mode = 'cli'; this.selected = null; return { consumed: false }; }
     if (token.name === 'escape') {
+      this.pendingConfig = null;
       if (this.mode === 'detail' && this.selectable().some(row => keyId(row.key) === keyId(this.selected))) this.mode = 'hud';
       else { this.mode = 'cli'; this.selected = null; }
       return { consumed: true };
@@ -336,9 +349,14 @@ class HudController {
       if (token.name === 'down') this.detailOffset = Math.min(Math.max(0, this.wrappedDetails(this.detailWidth).length - this.detailPageRows), this.detailOffset + 1);
       else if (token.name === 'up') this.detailOffset = Math.max(0, this.detailOffset - 1);
     } else if (this.mode === 'config') {
+      if (this.pendingConfig !== null) return { consumed: true };
       if (token.name === 'down') this.configIndex = Math.min(3, this.configIndex + 1);
       else if (token.name === 'up') this.configIndex = Math.max(0, this.configIndex - 1);
-      else if (token.name === 'enter') this.send({ type: 'config', request_id: ++this.requestId, changes: { preset: ['minimal', 'standard', 'full', 'focus'][this.configIndex] } });
+      else if (token.name === 'enter') {
+        this.pendingConfig = ++this.requestId;
+        this.configError = '';
+        this.send({ type: 'config', request_id: this.pendingConfig, changes: { preset: ['minimal', 'standard', 'full', 'focus'][this.configIndex] } });
+      }
     }
     return { consumed: true };
   }
@@ -383,7 +401,7 @@ class HudController {
   overlayLines(height, width) {
     const colors = { ...DEFAULT_COLORS, ...this.snapshot.display?.colors };
     if (this.mode === 'config') {
-      const rows = [' Codex HUD · configuration', '', ...['minimal', 'standard', 'full', 'focus'].map((name, i) => `${this.configIndex === i ? ' ›' : '  '} ${name}`), '', this.configError, ' ↑↓ select · Enter apply · Esc back'];
+      const rows = [' Codex HUD · configuration', '', ...['minimal', 'standard', 'full', 'focus'].map((name, i) => `${this.configIndex === i ? ' ›' : '  '} ${name}`), '', this.pendingConfig !== null ? ' Applying… · Esc back' : this.configError, ' ↑↓ select · Enter apply · Esc back'];
       return rows.map((text, i) => styledRow({ spans: [[text, i === 0 ? 'model' : 'text']] }, width, colors, i === this.configIndex + 2));
     }
     this.detailWidth = width;

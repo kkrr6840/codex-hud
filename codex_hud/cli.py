@@ -69,6 +69,65 @@ def configure_terminal(spec):
         tmux(socket, "set-option", "-s", f"terminal-features[{max(indices, default=-1) + 1}]", "tmux*:sync")
 
 
+def attach_client_command(socket, session, flags, sync=True):
+    argv = [shutil.which("tmux"), "-L", socket]
+    if sync:
+        argv += ["-T", "sync"]
+    argv += ["attach-session", "-t", session]
+    saved = [flag for flag in flags.split(",") if flag in ("active-pane", "ignore-size", "no-output", "wait-exit") or re.fullmatch(r"pause-after=\d+", flag)]
+    if saved:
+        argv += ["-f", ",".join(saved)]
+    return "exec " + shlex.join(argv)
+
+
+def unwrap_owned_parent(spec):
+    """Connect a visible parent HUD client directly to this HUD's session.
+
+    Only a private HUD created by this plugin is eligible. User tmux servers,
+    other windows, read-only/control clients and all CLI processes are kept.
+    """
+    socket = spec["socket"]
+    def environment(key):
+        value = tmux(socket, "show-environment", "-g", key, check=False).stdout.strip()
+        return value[len(key)+1:] if value.startswith(key + "=") else ""
+    parent_name = Path(environment("TMUX").split(",", 1)[0]).name
+    pane = environment("TMUX_PANE")
+    if not parent_name.startswith("codex-hud-") or parent_name == socket or not re.fullmatch(r"%\d+", pane):
+        return []
+    parent_dir = Path(spec["runtime"]).parent / parent_name
+    parent = read_json(parent_dir / "spec.json", {})
+    if parent.get("socket") != parent_name or parent.get("runtime") != str(parent_dir) or parent.get("home") != spec["home"] or parent_dir.stat().st_uid != os.getuid():
+        return []
+    parent_tty = tmux(parent_name, "display-message", "-p", "-t", pane, "#{pane_tty}", check=False).stdout.strip()
+    if not parent_tty.startswith("/dev/"):
+        return []
+    fields = "#{client_name}\t#{client_termfeatures}\t#{client_flags}\t#{client_readonly}\t#{client_control_mode}\t#{pane_id}"
+    def clients(name):
+        return [line.split("\t") for line in tmux(name, "list-clients", "-F", fields).stdout.splitlines() if len(line.split("\t")) == 6]
+    nested = [row for row in clients(socket) if row[0] == parent_tty and row[3:5] == ["0", "0"] and "suspended" not in row[2].split(",")]
+    if not nested:
+        return []
+    session = tmux(socket, "display-message", "-p", "-t", spec["top"], "#{session_name}").stdout.strip()
+    updated = []
+    for name, features, flags, readonly, control, active in clients(parent_name):
+        if active != pane or readonly != "0" or control != "0" or "suspended" in flags.split(","):
+            continue
+        command = attach_client_command(socket, session, flags, "sync" in features.split(","))
+        tmux(parent_name, "detach-client", "-t", name, "-E", command)
+        for _ in range(40):
+            if any(row[0] == name for row in clients(socket)):
+                updated.append(name)
+                break
+            time.sleep(.05)
+        else:
+            raise RuntimeError("直接显示连接未恢复；两个 HUD 的 CLI 和会话仍保留")
+    if updated:
+        # The replacement is attached before the redundant nested client leaves.
+        for row in nested:
+            tmux(socket, "detach-client", "-t", row[0])
+    return updated
+
+
 def reconnect_unsynced_clients(spec):
     """Apply newly configured capabilities to old nested terminal clients.
 
@@ -86,12 +145,7 @@ def reconnect_unsynced_clients(spec):
         name, terminal, features, session, readonly, control, flags = values
         if not terminal.startswith("tmux") or "sync" in features.split(",") or readonly != "0" or control != "0" or not session or "suspended" in flags.split(","):
             continue
-        argv = [shutil.which("tmux"), "-L", socket, "-T", "sync", "attach-session", "-t", session]
-        saved_flags = [flag for flag in flags.split(",") if flag in ("active-pane", "ignore-size", "no-output", "wait-exit") or re.fullmatch(r"pause-after=\d+", flag)]
-        if saved_flags:
-            argv += ["-f", ",".join(saved_flags)]
-        attach = shlex.join(argv)
-        tmux(socket, "detach-client", "-t", name, "-E", "exec " + attach)
+        tmux(socket, "detach-client", "-t", name, "-E", attach_client_command(socket, session, flags))
         for _ in range(40):
             current = tmux(socket, "list-clients", "-F", "#{client_name}\t#{client_termfeatures}").stdout.splitlines()
             if any(row.split("\t", 1)[0] == name and "sync" in row.split("\t", 1)[-1].split(",") for row in current):
@@ -544,11 +598,12 @@ def refresh_panels(argv):
         tmux(socket, "bind-key", "H", "run-shell", command("_toggle", runtime, runtime=runtime))
         tmux(socket, "bind-key", "C", "display-popup", "-E", "-w", "85%", "-h", "85%", command("config", "--menu", runtime=runtime))
         bind_agents(spec)
+        unwrapped = unwrap_owned_parent(spec)
         reconnected = reconnect_unsynced_clients(spec)
         after = tmux(socket, "display-message", "-p", "-t", spec["top"], "#{pane_pid}").stdout.strip()
         if before != after:
             raise RuntimeError("CLI pane identity changed while refreshing HUD")
-        updated.append({"runtime": str(runtime), "cli_pid": before, "reconnected_clients": reconnected})
+        updated.append({"runtime": str(runtime), "cli_pid": before, "reconnected_clients": reconnected, "unwrapped_clients": unwrapped})
     print(json.dumps({"updated": updated}, ensure_ascii=False))
     return 0 if updated else 1
 

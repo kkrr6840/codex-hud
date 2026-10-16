@@ -7,12 +7,17 @@ import unittest
 from unittest.mock import patch
 
 from codex_hud.keys import clear, down, empty_composer
-from codex_hud.cli import reconnect_unsynced_clients
+from codex_hud.cli import reconnect_unsynced_clients, unwrap_owned_parent
 
 EMPTY = "\x1b[1m\x1b[48;2;30;30;30m›\x1b[0m\x1b[48;2;30;30;30m \x1b[2mAsk Codex to do anything\x1b[0m\n"
 
 
 class TerminalRefreshTest(unittest.TestCase):
+    def test_personal_tmux_is_not_unwrapped(self):
+        with patch("codex_hud.cli.tmux", return_value=subprocess.CompletedProcess([], 0, "TMUX=/tmp/tmux-501/personal,123,0\n")) as call:
+            self.assertEqual(unwrap_owned_parent({"socket": "codex-hud-child", "runtime": "/tmp/codex-hud-child"}), [])
+            self.assertTrue(all(item.args[1] == "show-environment" for item in call.call_args_list))
+
     def test_only_old_writable_nested_clients_reconnect_and_repeat_is_a_noop(self):
         calls, refreshed = [], False
         def tmux(socket, *args):

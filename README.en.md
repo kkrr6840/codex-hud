@@ -83,7 +83,7 @@ Press **Ctrl-b**, release it, then press uppercase **C** to open the settings me
 - `L`: switch layout; `G`: switch language.
 - Esc: close the menu. Changes save immediately.
 
-On Windows, use Up/Down to select a preset and Enter to apply it. **F8** also opens this menu. The hud skill supports all display settings on both platforms, with live updates.
+On Windows, use Up/Down to select a preset and Enter to apply it. **F8** also opens this menu. Starting with v0.7.6, a successful save returns to the CLI automatically; errors keep the menu open for retry, and Esc can leave while saving. The hud skill supports all display settings on both platforms, with live updates.
 
 Or use the hud skill in plain language:
 
@@ -138,6 +138,8 @@ Quota bars use official rate-limit snapshots received by the current thread. The
 Codex HUD uses a private tmux session on macOS and a native ConPTY terminal host on Windows. Both launch the official CLI with `--no-daemon` and a private diagnostic directory. Non-interactive commands, help/version queries, redirected output, and remote sessions pass through to the official CLI. CLI approval and network policies still apply.
 
 Starting with v0.4.2, the private server enables synchronized updates for an outer tmux terminal and uses an explicit steady cursor in the CLI pane. Starting with v0.7.5, refresh replaces an old nested display connection when its cached capabilities still lack synchronized updates. The CLI, session, typed draft and cursor position remain intact; the screen may briefly redraw once without reopening the conversation. Already synchronized, read-only, control-mode and suspended clients are not reconnected automatically.
+
+Starting with v0.7.6, refresh can connect a visible terminal directly to the current session when it was nested inside another private HUD owned by this plugin. This removes one scroll/redraw forwarding layer while keeping both CLI processes and their history. Personal tmux servers, other windows and protected clients are preserved. Existing Windows sessions load the new menu code on the next normal launch; Esc still returns from the current menu.
 
 ## Disable or remove
 

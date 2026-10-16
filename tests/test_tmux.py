@@ -243,6 +243,49 @@ f.close()
         self.wait_for(lambda: not Path(spec["runtime"]).exists())
 
     @unittest.skipUnless(sys.platform == "darwin", "macOS BSD script PTY test")
+    def test_refresh_unwraps_only_owned_parent_display_without_restarting_either_cli(self):
+        self.env["HUD_TEST_COMPOSER"] = "1"
+        parent = self.launch()
+        pane = self.tmux(parent, "new-window", "-d", "-n", "nested", "-P", "-F", "#{pane_id}", "sleep 300").stdout.strip()
+        parent_pid = self.tmux(parent, "display-message", "-p", "-t", parent["top"], "#{pane_pid}").stdout
+        parent_tty = self.tmux(parent, "display-message", "-p", "-t", pane, "#{pane_tty}").stdout.strip()
+        self.env["TMUX"] = self.tmux(parent, "display-message", "-p", "#{socket_path},#{pid},0").stdout.strip()
+        self.env["TMUX_PANE"] = pane
+        child = self.launch()
+        self.env.pop("TMUX"); self.env.pop("TMUX_PANE")
+        self.tmux(parent, "respawn-pane", "-k", "-t", pane, f"env -u TMUX tmux -L {child['socket']} attach-session -t codex")
+        self.tmux(parent, "select-window", "-t", "codex:nested")
+        parent_tty = self.tmux(parent, "display-message", "-p", "-t", pane, "#{pane_tty}").stdout.strip()
+        self.wait_for(lambda: parent_tty in self.tmux(child, "list-clients", "-F", "#{client_name}").stdout)
+        output = (self.base / "nested-parent-output.log").open("wb")
+        proc = subprocess.Popen(["/usr/bin/script", "-q", "/dev/null", "tmux", "-L", parent["socket"], "attach-session", "-t", "codex"],
+                                cwd=self.base, env=dict(self.env, TERM="xterm-256color"), stdin=subprocess.PIPE, stdout=output, stderr=subprocess.STDOUT)
+        self.pty_children.append((proc, output))
+        outer_tty = self.wait_for(lambda: self.tmux(parent, "list-clients", "-F", "#{client_name}").stdout.strip())
+        self.wait_for(lambda: self.snapshot(child).get("root", {}).get("id"))
+        draft = "nested-draft"
+        proc.stdin.write(draft.encode()); proc.stdin.flush()
+        self.wait_for(lambda: draft in self.tmux(child, "capture-pane", "-p", "-t", child["top"]).stdout)
+        before_pid = self.tmux(child, "display-message", "-p", "-t", child["top"], "#{pane_pid}").stdout
+        before_cursor = self.tmux(child, "display-message", "-p", "-t", child["top"], "#{cursor_x},#{cursor_y}").stdout
+        result = subprocess.run([sys.executable, str(ENTRY), "refresh", "--session", self.snapshot(child)["root"]["id"]], env=self.env, capture_output=True, text=True, timeout=15)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout)["updated"][0]["unwrapped_clients"], [outer_tty])
+        self.assertEqual(self.tmux(parent, "list-clients", "-F", "#{client_name}").stdout.strip(), "")
+        self.assertEqual(self.tmux(child, "list-clients", "-F", "#{client_name}").stdout.strip(), outer_tty)
+        self.assertEqual(self.tmux(child, "list-clients", "-F", "#{client_termname}").stdout.strip(), "xterm-256color")
+        self.assertEqual(self.tmux(child, "display-message", "-p", "-t", child["top"], "#{pane_pid}").stdout, before_pid)
+        self.assertEqual(self.tmux(parent, "display-message", "-p", "-t", parent["top"], "#{pane_pid}").stdout, parent_pid)
+        self.assertEqual(self.tmux(child, "display-message", "-p", "-t", child["top"], "#{cursor_x},#{cursor_y}").stdout, before_cursor)
+        self.assertIn(draft, self.tmux(child, "capture-pane", "-p", "-t", child["top"]).stdout)
+        proc.stdin.write(b"Z"); proc.stdin.flush()
+        self.wait_for(lambda: draft+"Z" in self.tmux(child, "capture-pane", "-p", "-t", child["top"]).stdout)
+        self.assertIsNone(proc.poll())
+        proc.stdin.write(b"\nquit\n"); proc.stdin.flush()
+        self.wait_for(lambda: not Path(child["runtime"]).exists())
+        self.assertEqual(self.tmux(parent, "has-session", "-t", "codex", check=False).returncode, 0)
+
+    @unittest.skipUnless(sys.platform == "darwin", "macOS BSD script PTY test")
     def test_agent_popup_navigates_live_output_without_restarting_cli(self):
         self.assert_auto_launch(inspect_agents=True)
 
