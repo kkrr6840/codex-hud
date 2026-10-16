@@ -25,6 +25,8 @@ v0.7.1 makes the text cache percentage and token/cache merge the defaults, inclu
 
 v0.7.2 adds an independent running-turn clock that updates each second from the main thread's recorded start time, even when the official CLI stops repainting with animations disabled. It includes tool and approval waits, unlike the official pause-aware clock. Missing start times remain hidden, and the clock leaves the HUD when the turn ends or is interrupted. Hide it with `config --hide turn_duration`. This does not repair or rewrite the official CLI's frozen status row; Windows backend upgrades apply on the next normal Codex launch.
 
+v0.7.4 fixes missing text after full, nearly full, or empty bars in the macOS panel. Quota percentages and reset times remain visible at those boundaries.
+
 Windows v0.7.1 recognizes the official npm platform-package aliases and records the exact Python interpreter used for setup. The launcher uses that executable directly instead of PATH's `python`, `py`, batch shims, or application aliases. If it becomes unavailable, the launcher warns before falling back to the official CLI. Existing Windows installations must run the hud skill's automatic setup once after upgrading to replace their generated `codex.cmd`.
 
 ## Requirements

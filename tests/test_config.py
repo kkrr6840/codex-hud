@@ -172,6 +172,26 @@ class ConfigTest(unittest.TestCase):
             paint(screen, snapshot, scroll=1, expanded=True, frame_cache=cache)
             self.assertEqual(screen.refreshes, 4)
 
+    def test_empty_bar_spans_do_not_hide_quota_percentage_or_reset(self):
+        class Screen:
+            def getmaxyx(self): return 4, 204
+            def erase(self): self.writes = []
+            def addstr(self, y, x, text, attr): self.writes.append(text)
+            def refresh(self): pass
+        screen = Screen()
+        renderer = SimpleNamespace(color_pair=lambda _: 0, A_BOLD=0, A_REVERSE=0, error=Exception)
+        for mode in ("remaining", "used"):
+            for used in (0, 1, 3, 50, 97, 100):
+                with self.subTest(mode=mode, used=used), patch("codex_hud.display.curses", renderer):
+                    snapshot = self.snapshot()
+                    snapshot["root"] = {"rate_limits": {"primary": {"window_minutes": 10080, "used_percent": used, "resets_at": 86500}}}
+                    snapshot["display"] = {**deepcopy(DEFAULT), "quota_value": mode}
+                    paint(screen, snapshot)
+                    text = "".join(screen.writes)
+                    value = 100-used if mode == "remaining" else used
+                    self.assertIn(("剩余 " if mode == "remaining" else "已用 ") + f"{value}%", text)
+                    self.assertIn("重置", text)
+
     def test_expanded_view_can_scroll_past_all_header_rows(self):
         class Screen:
             def __init__(self): self.writes = []

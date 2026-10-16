@@ -136,6 +136,27 @@ f.close()
         self.wait_for(lambda: not Path(spec["runtime"]).exists())
         self.assertNotEqual(self.tmux(spec, "has-session", "-t", "codex", check=False).returncode, 0)
 
+    def test_quota_percent_and_reset_survive_full_and_empty_bars_in_real_panel(self):
+        config = Path(self.env["CODEX_HUD_CONFIG_HOME"])
+        config.mkdir()
+        (config / "display.json").write_text(json.dumps({"show": {"model": False, "context": False, "tokens": False, "cache": False, "git": False}}))
+        spec = self.launch()
+        self.wait_for(lambda: self.snapshot(spec).get("root", {}).get("id"))
+        rollout = next((self.base / "home/sessions").glob("*.jsonl"))
+        pid = self.tmux(spec, "display-message", "-p", "-t", spec["top"], "#{pane_pid}").stdout.strip()
+        for used in (0, 3, 100, 50):
+            with self.subTest(used=used):
+                event = {"type": "event_msg", "payload": {"type": "token_count", "info": None, "rate_limits": {"primary": {"window_minutes": 10080, "used_percent": used, "resets_at": int(time.time())+86400}}}}
+                with rollout.open("a") as handle:
+                    handle.write(json.dumps(event) + "\n")
+                def shown():
+                    pane = self.tmux(spec, "capture-pane", "-p", "-t", spec["hud"]).stdout
+                    return pane if f"剩余 {100-used}%" in pane and "重置" in pane else None
+                self.wait_for(shown)
+        self.assertEqual(self.tmux(spec, "display-message", "-p", "-t", spec["top"], "#{pane_pid}").stdout.strip(), pid)
+        self.send(spec, "quit")
+        self.wait_for(lambda: not Path(spec["runtime"]).exists())
+
     def test_external_server_exit_is_cleaned_up(self):
         spec = self.launch()
         self.tmux(spec, "kill-server")

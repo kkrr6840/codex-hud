@@ -156,6 +156,8 @@ def paint(screen, snapshot, scroll=0, expanded=False, selected_key=None, frame_c
     for y, row in enumerate(visible[:height]):
         x = 0
         for text, kind in row.spans:
+            if not text:
+                continue
             rendered = clip(text, width - x - 1)
             if not rendered:
                 break
