@@ -75,7 +75,7 @@ For installations without a compatible symlink, open a new terminal tab to load 
 
 ## Customize the panel
 
-Press **Ctrl-b**, release it, then press uppercase **C** to open the settings menu. On macOS:
+On macOS, press **F10** to open the settings menu, or keep using **Ctrl-b** followed by uppercase **C**. Use **fn+F10** if the function row controls system audio. F8/F9 remain available for Codex voice. An existing unrelated tmux F10 binding is preserved. In the macOS menu:
 
 - Arrow keys: select an item.
 - Space: toggle visibility.
@@ -113,7 +113,7 @@ Press **Down** from the default empty composer to highlight the first agent in t
 | Select from empty input | Down | Down |
 | Move / inspect / return | Up/Down / Enter / Esc | Up/Down / Enter / Esc |
 | Auxiliary entry | Option (⌥)+Down, or Ctrl-b then Down | Alt+Down, or Ctrl-b then Down |
-| Settings | Ctrl-b then uppercase C | Ctrl-b then uppercase C, or F8 |
+| Settings | F10 (or fn+F10), or Ctrl-b then uppercase C | Ctrl-b then uppercase C, or F8 |
 
 If your Mac terminal reserves Option, use plain Down or Ctrl-b then Down. Auxiliary shortcuts open a list on macOS and select a HUD row on Windows. Use them when the composer has a different placeholder.
 

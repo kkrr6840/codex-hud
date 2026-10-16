@@ -157,6 +157,16 @@ def reconnect_unsynced_clients(spec):
     return updated
 
 
+def bind_settings(spec):
+    popup = ("display-popup", "-E", "-w", "85%", "-h", "85%", command("config", "--menu", runtime=spec["runtime"]))
+    tmux(spec["socket"], "bind-key", "C", *popup)
+    existing = tmux(spec["socket"], "list-keys", "-T", "root", "F10", check=False).stdout.strip()
+    if existing and not (spec["runtime"] in existing and "config --menu" in existing):
+        return False
+    tmux(spec["socket"], "bind-key", "-n", "F10", *popup)
+    return True
+
+
 def bind_agents(spec):
     popup = ("display-popup", "-E", "-w", "90%", "-h", "85%", command("_agents", spec["runtime"], runtime=spec["runtime"]))
     tmux(spec["socket"], "bind-key", "Down", *popup)
@@ -229,7 +239,7 @@ def launch(argv):
         spec["hud"] = split.stdout.strip()
         atomic_json(runtime / "spec.json", spec)
         tmux(socket, "bind-key", "H", "run-shell", command("_toggle", runtime, runtime=runtime))
-        tmux(socket, "bind-key", "C", "display-popup", "-E", "-w", "85%", "-h", "85%", command("config", "--menu", runtime=runtime))
+        bind_settings(spec)
         bind_agents(spec)
         tmux(socket, "select-pane", "-t", spec["top"])
         watcher = subprocess.Popen([sys.executable, str(runtime_entry(runtime)), "_watch", str(runtime)],
@@ -596,14 +606,15 @@ def refresh_panels(argv):
         configure_terminal(spec)
         tmux(socket, "respawn-pane", "-k", "-t", spec["hud"], command("_panel", runtime, runtime=runtime))
         tmux(socket, "bind-key", "H", "run-shell", command("_toggle", runtime, runtime=runtime))
-        tmux(socket, "bind-key", "C", "display-popup", "-E", "-w", "85%", "-h", "85%", command("config", "--menu", runtime=runtime))
+        f10_bound = bind_settings(spec)
         bind_agents(spec)
         unwrapped = unwrap_owned_parent(spec)
         reconnected = reconnect_unsynced_clients(spec)
         after = tmux(socket, "display-message", "-p", "-t", spec["top"], "#{pane_pid}").stdout.strip()
         if before != after:
             raise RuntimeError("CLI pane identity changed while refreshing HUD")
-        updated.append({"runtime": str(runtime), "cli_pid": before, "reconnected_clients": reconnected, "unwrapped_clients": unwrapped})
+        updated.append({"runtime": str(runtime), "cli_pid": before, "reconnected_clients": reconnected, "unwrapped_clients": unwrapped,
+                        "settings_shortcut": "F10" if f10_bound else "Ctrl-b C"})
     print(json.dumps({"updated": updated}, ensure_ascii=False))
     return 0 if updated else 1
 

@@ -7,12 +7,22 @@ import unittest
 from unittest.mock import patch
 
 from codex_hud.keys import clear, down, empty_composer
-from codex_hud.cli import reconnect_unsynced_clients, unwrap_owned_parent
+from codex_hud.cli import reconnect_unsynced_clients, unwrap_owned_parent, bind_settings
 
 EMPTY = "\x1b[1m\x1b[48;2;30;30;30m›\x1b[0m\x1b[48;2;30;30;30m \x1b[2mAsk Codex to do anything\x1b[0m\n"
 
 
 class TerminalRefreshTest(unittest.TestCase):
+    def test_settings_f10_preserves_other_bindings_and_leaves_voice_keys_alone(self):
+        spec = {"socket": "private-hud", "runtime": "/tmp/codex-hud-fixture"}
+        for existing, expected in [("", True), ("F10 run-shell user-action", False), ("F10 /tmp/codex-hud-fixture/code-old/codex-hud config --menu", True)]:
+            with self.subTest(existing=existing), patch("codex_hud.cli.command", return_value="owned config --menu"), patch("codex_hud.cli.tmux", return_value=subprocess.CompletedProcess([], 0, existing)) as call:
+                self.assertEqual(bind_settings(spec), expected)
+                binds = [item.args[1:] for item in call.call_args_list if item.args[1] == "bind-key"]
+                self.assertTrue(any(args[:2] == ("bind-key", "C") for args in binds))
+                self.assertEqual(any(args[:3] == ("bind-key", "-n", "F10") for args in binds), expected)
+                self.assertFalse(any("F8" in args or "F9" in args for args in binds))
+
     def test_personal_tmux_is_not_unwrapped(self):
         with patch("codex_hud.cli.tmux", return_value=subprocess.CompletedProcess([], 0, "TMUX=/tmp/tmux-501/personal,123,0\n")) as call:
             self.assertEqual(unwrap_owned_parent({"socket": "codex-hud-child", "runtime": "/tmp/codex-hud-child"}), [])

@@ -185,6 +185,10 @@ f.close()
         self.assert_auto_launch()
 
     @unittest.skipUnless(sys.platform == "darwin", "macOS BSD script PTY test")
+    def test_f10_opens_settings_and_preserves_draft_on_launch_and_refresh(self):
+        self.assert_auto_launch(check_settings=True)
+
+    @unittest.skipUnless(sys.platform == "darwin", "macOS BSD script PTY test")
     def test_cached_codex_in_already_open_shell_opens_hud_without_rehash(self):
         package = self.base / "npm-package"
         (package / "bin").mkdir(parents=True)
@@ -301,7 +305,7 @@ f.close()
         self.entry = cached / "codex-hud"
         self.assert_auto_launch(inspect_agents=True, direct_agents=True, remove_plugin=True)
 
-    def assert_auto_launch(self, cached=False, terminal="xterm-256color", inspect_agents=False, direct_agents=False, remove_plugin=False):
+    def assert_auto_launch(self, cached=False, terminal="xterm-256color", inspect_agents=False, direct_agents=False, remove_plugin=False, check_settings=False):
         Path(self.env["CODEX_HUD_SHELL_RC"]).write_text('codex() { HTTP_PROXY="http://fixture.invalid" command codex "$@"; }\n')
         if not cached:
             result = subprocess.run([sys.executable, str(self.entry), "setup", "--enable"],
@@ -311,7 +315,7 @@ f.close()
         runtimes.mkdir()
         env = dict(self.env, CODEX_HUD_RUNTIME_DIR=str(runtimes), TERM=terminal,
                    HUD_TEST_PYTHON=sys.executable, HUD_TEST_ENTRY=str(self.entry))
-        if direct_agents:
+        if direct_agents or check_settings:
             env["HUD_TEST_COMPOSER"] = "1"
         # BSD script owns the PTY lifecycle. Avoid Python pty.fork on macOS,
         # where forking a framework-linked interpreter can leave an exit hang.
@@ -342,6 +346,31 @@ f.close()
             terminal_bytes = (self.base / "terminal-output.log").read_bytes()
             self.assertIn(b"\x1b[?2026h", terminal_bytes)
             self.assertIn(b"\x1b[?2026l", terminal_bytes)
+        if check_settings:
+            draft = "settings-draft"
+            proc.stdin.write(draft.encode()); proc.stdin.flush()
+            self.wait_for(lambda: draft in self.tmux(spec, "capture-pane", "-p", "-t", spec["top"]).stdout)
+            before = self.tmux(spec, "display-message", "-p", "-t", spec["top"], "#{pane_pid} #{cursor_x},#{cursor_y}").stdout
+            def menu_pids():
+                listing = subprocess.check_output(["ps", "-axo", "pid=,command="], text=True)
+                return [line.split()[0] for line in listing.splitlines() if spec["runtime"] in line and " config --menu" in line]
+            for refresh in (False, True):
+                if refresh:
+                    result = subprocess.run([sys.executable, str(ENTRY), "refresh", "--session", identity], env=env, capture_output=True, text=True, timeout=15)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(json.loads(result.stdout)["updated"][0]["settings_shortcut"], "F10")
+                bindings = self.tmux(spec, "list-keys", "-T", "root").stdout
+                self.assertTrue(any(" F10 " in line and "config --menu" in line for line in bindings.splitlines()))
+                self.assertFalse(any(" F8 " in line or " F9 " in line for line in bindings.splitlines()))
+                proc.stdin.write(b"\x1b[21~"); proc.stdin.flush()
+                self.wait_for(menu_pids)
+                self.wait_for(lambda: "显示设置" in (self.base / "terminal-output.log").read_text(errors="replace"))
+                proc.stdin.write(b"\x1b"); proc.stdin.flush()
+                self.wait_for(lambda: not menu_pids())
+                self.assertIn(draft, self.tmux(spec, "capture-pane", "-p", "-t", spec["top"]).stdout)
+                self.assertEqual(self.tmux(spec, "display-message", "-p", "-t", spec["top"], "#{pane_pid} #{cursor_x},#{cursor_y}").stdout, before)
+            proc.stdin.write(b"\x15\r"); proc.stdin.flush()
+            self.wait_for(lambda: self.tmux(spec, "display-message", "-p", "-t", spec["top"], "#{cursor_x}").stdout.strip() == "2")
         if inspect_agents:
             import sqlite3
             home = Path(spec["home"])
