@@ -160,7 +160,8 @@ def reconnect_unsynced_clients(spec):
 def bind_settings(spec):
     popup = ("display-popup", "-E", "-w", "85%", "-h", "85%", command("config", "--menu", runtime=spec["runtime"]))
     tmux(spec["socket"], "bind-key", "C", *popup)
-    existing = tmux(spec["socket"], "list-keys", "-T", "root", "F10", check=False).stdout.strip()
+    bindings = tmux(spec["socket"], "list-keys", "-T", "root").stdout.splitlines()
+    existing = "\n".join(line for line in bindings if re.search(r"(?:^|\s)-T\s+root\s+F10(?:\s|$)", line))
     if existing and not (spec["runtime"] in existing and "config --menu" in existing):
         return False
     tmux(spec["socket"], "bind-key", "-n", "F10", *popup)

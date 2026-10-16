@@ -188,6 +188,18 @@ f.close()
     def test_f10_opens_settings_and_preserves_draft_on_launch_and_refresh(self):
         self.assert_auto_launch(check_settings=True)
 
+    def test_refresh_preserves_a_foreign_f10_binding(self):
+        spec = self.launch()
+        self.wait_for(lambda: self.snapshot(spec).get("root", {}).get("id"))
+        self.tmux(spec, "bind-key", "-n", "F10", "display-message", "user-owned F10")
+        result = subprocess.run([sys.executable, str(ENTRY), "refresh", "--session", self.snapshot(spec)["root"]["id"]], env=self.env, capture_output=True, text=True, timeout=15)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout)["updated"][0]["settings_shortcut"], "Ctrl-b C")
+        bindings = self.tmux(spec, "list-keys", "-T", "root").stdout
+        self.assertTrue(any(" F10 " in line and "user-owned F10" in line for line in bindings.splitlines()))
+        self.send(spec, "quit")
+        self.wait_for(lambda: not Path(spec["runtime"]).exists())
+
     @unittest.skipUnless(sys.platform == "darwin", "macOS BSD script PTY test")
     def test_cached_codex_in_already_open_shell_opens_hud_without_rehash(self):
         package = self.base / "npm-package"

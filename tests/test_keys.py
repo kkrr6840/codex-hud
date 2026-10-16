@@ -15,7 +15,7 @@ EMPTY = "\x1b[1m\x1b[48;2;30;30;30m›\x1b[0m\x1b[48;2;30;30;30m \x1b[2mAsk Code
 class TerminalRefreshTest(unittest.TestCase):
     def test_settings_f10_preserves_other_bindings_and_leaves_voice_keys_alone(self):
         spec = {"socket": "private-hud", "runtime": "/tmp/codex-hud-fixture"}
-        for existing, expected in [("", True), ("F10 run-shell user-action", False), ("F10 /tmp/codex-hud-fixture/code-old/codex-hud config --menu", True)]:
+        for existing, expected in [("bind-key -T root F8 user-voice", True), ("bind-key -T root F10 run-shell user-action", False), ("bind-key -r -T root F10 run-shell user-action", False), ("bind-key -T root F10 /tmp/codex-hud-fixture/code-old/codex-hud config --menu", True)]:
             with self.subTest(existing=existing), patch("codex_hud.cli.command", return_value="owned config --menu"), patch("codex_hud.cli.tmux", return_value=subprocess.CompletedProcess([], 0, existing)) as call:
                 self.assertEqual(bind_settings(spec), expected)
                 binds = [item.args[1:] for item in call.call_args_list if item.args[1] == "bind-key"]
