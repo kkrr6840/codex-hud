@@ -593,6 +593,7 @@ class Collector:
         self.extra_cache = {}
         self.skill_turn = None
         self.skill_reads = []
+        self.skill_records = []
 
     def reader(self, path):
         path = str(path)
@@ -614,6 +615,7 @@ class Collector:
                     self.watermarks.clear()
                     self.tasks.clear()
                     self.jobs.clear()
+                    self.skill_turn, self.skill_reads, self.skill_records = None, [], []
             except (OSError, sqlite3.Error, subprocess.SubprocessError) as error:
                 errors.append(f"会话绑定: {error}")
                 self.root_path, self.root_id = None, None
@@ -621,6 +623,7 @@ class Collector:
                 self.watermarks.clear()
                 self.tasks.clear()
                 self.jobs.clear()
+                self.skill_turn, self.skill_reads, self.skill_records = None, [], []
         root = dict(self.reader(self.root_path)) if self.root_path and (self.root_path.exists() or str(self.root_path) in self.readers) else {}
         if root.get("id"):
             self.root_id = root["id"]
@@ -686,6 +689,7 @@ class Collector:
                             if current_turn.get("turn_id") != self.skill_turn:
                                 self.skill_turn = current_turn.get("turn_id")
                                 self.skill_reads = []
+                                self.skill_records = []
                         watermark = self.watermarks.get(owner, -1)
                         # Separate the two indexed ranges. An OR here can make
                         # SQLite scan every old item in this thread each tick.
@@ -713,15 +717,25 @@ class Collector:
                                     record = dict(row)
                                     same_turn = record.get("turn_id") == self.skill_turn if record.get("turn_id") else bool(turn and record.get("created_at_ms", 0) >= (turn["started_at"] or 0)*1000)
                                     if same_turn:
-                                        from .skills import read_skills
-                                        for name in read_skills(json.loads(row["item_json"])):
+                                        from .skills import read_skill_records
+                                        for skill in read_skill_records(json.loads(row["item_json"])):
+                                            name = skill["name"]
                                             if name not in self.skill_reads:
                                                 self.skill_reads.append(name)
+                                            detail = {**skill, "owner": owner, "turn_id": self.skill_turn,
+                                                      "read_at": (record.get("completed_at_ms") or record.get("created_at_ms") or 0) / 1000}
+                                            previous = next((s for s in self.skill_records if s["path"] == skill["path"]), None)
+                                            if previous is None:
+                                                self.skill_records.append(detail)
+                                            else:
+                                                previous.update({k: v for k, v in detail.items() if k != "description" or v})
                                 job = offload_job(dict(row), offload["model"], self.launched_at)
                                 if job:
                                     self.jobs[(owner, job["id"])] = job
                 if self.root_id in turns:
                     root["skills"] = list(self.skill_reads)
+                    root["skill_reads"] = [dict(skill) for skill in self.skill_records]
+                    root["skill_turn_id"] = self.skill_turn
                     root["status"] = turn_state(turns[self.root_id], True, self.launched_at)
                     root["started"] = turns[self.root_id].get("started_at")
                 elif root.get("status") == "completed":
@@ -743,7 +757,7 @@ class Collector:
                                    "name": row.get("agent_nickname") or row.get("agent_path") or owner[:8],
                                    "nickname": row.get("agent_nickname"), "model": row.get("model") or detail.get("model"),
                                    "task": self.tasks.get(owner) or detail.get("task") or row.get("first_user_message") or row.get("title") or ((row.get("agent_path") or "").removeprefix("/root/") + " (任务名；详细指令加密)" if detail.get("task_locked") else row.get("agent_path") or "任务未知"),
-                                   "status": status, "started": (turn or {}).get("started_at") or detail.get("started"),
+                                   "status": status, "turn_id": (turn or {}).get("turn_id"), "started": (turn or {}).get("started_at") or detail.get("started"),
                                    "ended": (turn or {}).get("completed_at") or detail.get("ended"),
                                    "duration": (turn["duration_ms"] / 1000 if turn and turn.get("duration_ms") is not None else detail.get("duration"))})
                     agents[-1]["usage"] = detail.get("usage")

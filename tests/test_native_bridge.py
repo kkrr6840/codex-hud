@@ -100,6 +100,27 @@ class NativeBridgeTest(unittest.TestCase):
         self.assertIn("error", state.request({"type": "config", "changes": {"preset": "unknown"}}))
         self.assertTrue((self.runtime/"snapshot.json").is_file())
 
+    def test_action_rebinds_and_returns_only_a_scoped_draft(self):
+        from codex_hud.management import stamp
+        state = Bridge(self.runtime)
+        state.collect()
+        item = {"id": self.child, "status": "running", "started": 1, "turn_id": "turn-A"}
+        state.snapshot["agents"] = [item]
+        request = {"type": "action", "request_id": 1, "root": self.root, "key": ["native", self.child], "action": "stop", "stamp": stamp(item)}
+        with patch.object(state, "collect", return_value={"snapshot": state.snapshot}):
+            response = state.request(request)
+            self.assertIn(self.child, response["draft"])
+            self.assertEqual(response["request_id"], 1)
+            self.assertIn("error", state.request({**request, "root": self.other}))
+            self.assertIn("error", state.request({**request, "key": ["native", self.other]}))
+        with patch.object(state, "collect", side_effect=OSError("fixture unavailable")):
+            error = state.request(request)
+            self.assertEqual(error["root"], self.root)
+            self.assertEqual(error["key"], request["key"])
+            self.assertIn("fixture unavailable", error["error"])
+        self.identify(self.other)
+        self.assertIn("error", state.request(request))
+
     def test_real_jsonl_process_refreshes_model_and_root_then_exits_on_eof(self):
         # A stalled Windows pipe must provide a traceback rather than a silent
         # timeout. Execute the same entry, with only a diagnostic watchdog added.

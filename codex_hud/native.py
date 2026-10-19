@@ -93,7 +93,8 @@ class Bridge:
         def rows(config):
             return [{"spans": r.spans, "pinned": r.pinned, "key": r.key} for r in render_rows(snapshot, self.width, config)]
         full = {**cfg, "agents_limit": 0}
-        return {"type": "snapshot", "snapshot": snapshot, "rows": rows(cfg), "all_rows": rows(full)}
+        history = {**full, "agents_show_completed": True, "agents_show_failed": True}
+        return {"type": "snapshot", "snapshot": snapshot, "rows": rows(cfg), "all_rows": rows(full), "history_rows": rows(history)}
 
     def request(self, data):
         from .agents import details, entries
@@ -106,7 +107,15 @@ class Bridge:
                 self.width = value
             return None
         try:
-            if kind == "detail":
+            if kind == "action":
+                from .management import request_text
+                result.update(root=data.get("root"), key=data.get("key"))
+                # Explicit requests rebind immediately rather than waiting for
+                # the normal display polling interval after /new.
+                self.collector.last_bind = 0
+                snapshot = self.collect()["snapshot"]
+                result["draft"] = request_text(snapshot, data.get("root"), data.get("key") or [], data.get("action"), data.get("stamp"))
+            elif kind == "detail":
                 root = self.snapshot.get("root", {}).get("id")
                 key = tuple(data.get("key") or [])
                 result.update(root=data.get("root"), key=key)

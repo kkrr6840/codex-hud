@@ -110,9 +110,15 @@ Starting with v0.7.10, normal macOS launches end when their last terminal connec
 
 After an upgrade, the hud skill can refresh the macOS observer while keeping the main CLI running. Starting with v0.6.3, open macOS sessions keep their panel, arrow navigation, and menus working even when the plugin manager removes the old version's cache. No session restart is needed. Windows backend upgrades apply on the next normal launch; display preferences update live on both platforms.
 
-## Select agents directly (v0.6)
+## Task management and Skill details (v0.8)
 
-Press **Down** from the default empty composer to highlight the first agent in the HUD. **Up/Down** selects, **Enter** opens details, and **Esc** returns to the HUD and then to the input. Up from the first entry also returns to the input. With a draft, a native menu, or no selectable agents, Down passes through to Codex.
+Press **Down** from the default empty composer to highlight the first selectable Skills or agent row. **Up/Down** selects, **Enter** opens details, and **Esc** returns to the HUD and then to the input. Up from the first entry also returns to the input. With a draft, a native menu, or no selectable rows, Down passes through to Codex.
+
+Select **Skills** and press Enter to inspect all recorded names, descriptions, sources, original paths, and read times for the main thread's current turn. Details are not limited by `skills_limit`; same-named skills at different paths remain separate. Descriptions come from attributable successful read output, not from opening logged paths. Missing metadata stays unavailable and the list resets on the next turn.
+
+In agent details, **S** prepares a stop request for a running task and **R** prepares a retry request for an ended task. **Enter** confirms preparation; **Esc** cancels. The request is placed in an empty main composer for review. Press Enter there to send it to the main conversation for execution. HUD never auto-submits, signals a worker, or claims that preparing a draft completed the operation. Existing drafts, changed targets, and switched conversations reject preparation.
+
+Use **Ctrl-b followed by Down** to inspect completed and failed history without changing normal visibility preferences. The Mac list supports **H** to switch between active and all records; on Windows, return to the main input and use ordinary Down for the normal list.
 
 | Action | macOS | Windows |
 | --- | --- | --- |

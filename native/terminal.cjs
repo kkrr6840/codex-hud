@@ -255,6 +255,8 @@ class HudController {
     this.snapshot = {};
     this.rows = [];
     this.allRows = [];
+    this.historyRows = [];
+    this.showHistory = false;
     this.root = null;
     this.mode = 'cli';
     this.selected = null;
@@ -270,6 +272,11 @@ class HudController {
     this.configIndex = 0;
     this.configError = '';
     this.pendingConfig = null;
+    this.pendingAction = null;
+    this.pendingDraft = null;
+    this.actionChoice = null;
+    this.actionStamp = null;
+    this.actionError = '';
   }
   update(packet) {
     if (packet.type === 'snapshot') {
@@ -278,20 +285,28 @@ class HudController {
         this.mode = 'cli'; this.selected = null; this.scroll = 0;
         this.pendingConfig = null; this.configError = '';
         this.pendingDetail = null; this.detailLines = []; this.detailOffset = 0;
+        this.pendingAction = null; this.pendingDraft = null; this.actionChoice = null; this.showHistory = false;
       }
       this.root = root;
       this.snapshot = packet.snapshot || {};
       this.rows = Array.isArray(packet.rows) ? packet.rows : [];
       this.allRows = Array.isArray(packet.all_rows) ? packet.all_rows : this.rows;
-      const inspectingRecordedAgent = this.mode === 'detail' && this.selected &&
-        (this.selected[0] === 'native' ? this.snapshot.agents : this.snapshot.offload?.jobs)?.some(item => item.id === this.selected[1]);
+      this.historyRows = Array.isArray(packet.history_rows) ? packet.history_rows : this.allRows;
+      const inspectingRecordedAgent = ['detail', 'action'].includes(this.mode) && this.selected && this.selectedItem();
       if (this.selected && !this.selectable().some(row => keyId(row.key) === keyId(this.selected)) && !inspectingRecordedAgent) {
         this.selected = null; this.mode = 'cli'; this.pendingDetail = null;
+        this.pendingAction = null; this.pendingDraft = null; this.actionChoice = null;
       }
       if (this.mode === 'detail') this.requestDetail();
     } else if (packet.type === 'detail' && this.mode === 'detail' && packet.request_id === this.pendingDetail &&
       packet.root === this.root && keyId(packet.key) === keyId(this.selected)) {
       this.detailLines = packet.error ? [String(packet.error)] : (packet.lines || []).map(String);
+    } else if (packet.type === 'action' && this.mode === 'action' && this.pendingAction !== null &&
+      packet.request_id === this.pendingAction && packet.root === this.root && keyId(packet.key) === keyId(this.selected)) {
+      this.pendingAction = null;
+      this.actionError = packet.error ? String(packet.error) : '';
+      if (!this.actionError && typeof packet.draft === 'string' && packet.draft.length <= 12000 && !/[\r\n\x00\x1b]/.test(packet.draft)) this.pendingDraft = packet.draft;
+      else if (!this.actionError) this.actionError = 'Invalid request draft';
     } else if (packet.type === 'config' && this.mode === 'config' &&
       this.pendingConfig !== null && packet.request_id === this.pendingConfig) {
       this.pendingConfig = null;
@@ -303,9 +318,32 @@ class HudController {
     this.prefix = false;
     this.mode = 'config'; this.selected = null; this.pendingDetail = null;
     this.pendingConfig = null; this.configError = '';
+    this.pendingAction = null; this.pendingDraft = null; this.actionChoice = null;
   }
-  selectable() { return this.allRows.filter(row => keyId(row.key)); }
-  enterHud() {
+  selectedItem() {
+    if (!this.selected) return null;
+    if (this.selected[0] === 'skills') return this.snapshot.root?.skills?.length &&
+      (this.snapshot.root.skill_turn_id || this.root) === this.selected[1] ? { kind: 'skills' } : null;
+    const items = this.selected[0] === 'native' ? this.snapshot.agents : this.snapshot.offload?.jobs;
+    const item = items?.find(item => item.id === this.selected[1]);
+    return item ? { ...item, kind: this.selected[0] } : null;
+  }
+  availableAction() {
+    const item = this.selectedItem();
+    if (!item || !['native', 'relay'].includes(item.kind)) return null;
+    if (item.status === 'running') return 'stop';
+    return ['completed', 'failed'].includes(item.status) || (['unknown', 'idle'].includes(item.status) && item.ended != null) ? 'retry' : null;
+  }
+  takeDraft(empty) {
+    if (this.pendingDraft === null) return null;
+    const draft = this.pendingDraft; this.pendingDraft = null;
+    if (!empty) { this.actionError = '输入框已有草稿或菜单 / composer is not empty'; return null; }
+    this.mode = 'cli'; this.selected = null; this.actionChoice = null;
+    return draft;
+  }
+  selectable() { return (this.showHistory ? this.historyRows : this.allRows).filter(row => keyId(row.key)); }
+  enterHud(history = false) {
+    this.showHistory = history;
     const rows = this.selectable();
     if (!rows.length) return false;
     this.selected = rows[0].key; this.mode = 'hud'; this.scroll = 0;
@@ -319,7 +357,7 @@ class HudController {
     if (token.name === 'config') { this.openConfig(); return { consumed: true }; }
     if (this.prefix) {
       this.prefix = false;
-      if (token.name === 'down') { const consumed = this.enterHud(); return { consumed, prepend: consumed ? '' : '\x02' }; }
+      if (token.name === 'down') { const consumed = this.enterHud(true); return { consumed, prepend: consumed ? '' : '\x02' }; }
       if (token.raw === 'C') { this.openConfig(); return { consumed: true }; }
       return { consumed: false, prepend: '\x02' };
     }
@@ -327,9 +365,11 @@ class HudController {
     if (this.mode === 'cli') {
       return { consumed: (token.name === 'altDown' || (token.name === 'down' && empty)) && this.enterHud() };
     }
-    if (token.name === 'interrupt') { this.pendingConfig = null; this.mode = 'cli'; this.selected = null; return { consumed: false }; }
+    if (token.name === 'interrupt') { this.pendingConfig = null; this.pendingAction = null; this.pendingDraft = null; this.mode = 'cli'; this.selected = null; return { consumed: false }; }
     if (token.name === 'escape') {
       this.pendingConfig = null;
+      this.pendingAction = null; this.pendingDraft = null;
+      if (this.mode === 'action') { this.mode = 'detail'; this.actionChoice = null; return { consumed: true }; }
       if (this.mode === 'detail' && this.selectable().some(row => keyId(row.key) === keyId(this.selected))) this.mode = 'hud';
       else { this.mode = 'cli'; this.selected = null; }
       return { consumed: true };
@@ -348,6 +388,16 @@ class HudController {
     } else if (this.mode === 'detail') {
       if (token.name === 'down') this.detailOffset = Math.min(Math.max(0, this.wrappedDetails(this.detailWidth).length - this.detailPageRows), this.detailOffset + 1);
       else if (token.name === 'up') this.detailOffset = Math.max(0, this.detailOffset - 1);
+      else if ((/^[sS]$/.test(token.raw) && this.availableAction() === 'stop') || (/^[rR]$/.test(token.raw) && this.availableAction() === 'retry')) {
+        this.mode = 'action'; this.actionChoice = this.availableAction(); this.actionError = '';
+        this.pendingAction = null; this.pendingDraft = null;
+        const item = this.selectedItem(); this.actionStamp = ['turn_id', 'started', 'ended', 'status'].map(key => item[key] ?? null);
+      }
+    } else if (this.mode === 'action') {
+      if (token.name === 'enter' && this.pendingAction === null) {
+        this.pendingAction = ++this.requestId; this.actionError = '';
+        this.send({ type: 'action', request_id: this.pendingAction, root: this.root, key: this.selected, action: this.actionChoice, stamp: this.actionStamp });
+      }
     } else if (this.mode === 'config') {
       if (this.pendingConfig !== null) return { consumed: true };
       if (token.name === 'down') this.configIndex = Math.min(3, this.configIndex + 1);
@@ -361,7 +411,7 @@ class HudController {
     return { consumed: true };
   }
   height(totalRows, fallback = 11) {
-    const rows = this.mode === 'hud' ? this.allRows : this.rows;
+    const rows = this.mode === 'hud' ? (this.showHistory ? this.historyRows : this.allRows) : this.rows;
     if (!rows.length) return 0;
     const desired = Number(this.snapshot.display?.height) || fallback;
     return Math.max(0, Math.min(desired, Math.floor(totalRows / 2), rows.length + (this.mode === 'hud' ? 1 : 0)));
@@ -369,7 +419,7 @@ class HudController {
   hudLines(height, width) {
     if (!height) return [];
     const colors = { ...DEFAULT_COLORS, ...this.snapshot.display?.colors };
-    const source = this.mode === 'hud' ? this.allRows : this.rows;
+    const source = this.mode === 'hud' ? (this.showHistory ? this.historyRows : this.allRows) : this.rows;
     const footer = this.mode === 'hud' || source.length > height;
     let pinnedCount = 0;
     while (source[pinnedCount]?.pinned) pinnedCount++;
@@ -387,7 +437,7 @@ class HudController {
     if (footer) {
       const language = this.snapshot.display?.language;
       const hint = this.mode === 'hud' ? (language === 'en' ? ' ↑↓ select · Enter inspect · Esc back to input' : ' ↑↓ 选择 · Enter 查看 · Esc 返回输入') :
-        (language === 'en' ? ' ↓ from empty input · Alt+↓ inspect agents' : ' 空输入框 ↓ · Alt+↓ 选择 agent');
+        (language === 'en' ? ' ↓ inspect · Ctrl-b ↓ include history' : ' 空输入框 ↓ 查看 · Ctrl-b ↓ 包含历史');
       lines.push(styledRow({ spans: [[hint, 'dim']] }, width, colors));
     }
     return lines.concat(Array(Math.max(0, height - lines.length)).fill(''));
@@ -400,6 +450,14 @@ class HudController {
   }
   overlayLines(height, width) {
     const colors = { ...DEFAULT_COLORS, ...this.snapshot.display?.colors };
+    if (this.mode === 'action') {
+      const en = this.snapshot.display?.language === 'en';
+      const rows = [' Codex HUD · ' + this.actionChoice, '', String(this.selected?.[1] || ''), '',
+        en ? 'Prepare a request in the main composer; review it and press Enter there to send.' : '生成请求到主输入框；检查后再按 Enter 发送，由主会话执行。', '',
+        this.actionError || (this.pendingAction !== null ? (en ? 'Preparing…' : '正在生成…') : ''),
+        en ? 'Enter prepare draft · Esc cancel' : 'Enter 生成草稿 · Esc 取消'];
+      return rows.flatMap(text => wrapText(text, width)).map(text => styledRow({ spans: [[text, 'text']] }, width, colors));
+    }
     if (this.mode === 'config') {
       const rows = [' Codex HUD · configuration', '', ...['minimal', 'standard', 'full', 'focus'].map((name, i) => `${this.configIndex === i ? ' ›' : '  '} ${name}`), '', this.pendingConfig !== null ? ' Applying… · Esc back' : this.configError, ' ↑↓ select · Enter apply · Esc back'];
       return rows.map((text, i) => styledRow({ spans: [[text, i === 0 ? 'model' : 'text']] }, width, colors, i === this.configIndex + 2));
@@ -408,11 +466,14 @@ class HudController {
     this.detailPageRows = Math.max(1, height - 2);
     const details = this.wrappedDetails(width);
     this.detailOffset = Math.max(0, Math.min(this.detailOffset, Math.max(0, details.length - this.detailPageRows)));
-    const header = ` Agent ${this.selected?.[0]} · ${this.selected?.[1]} · read only`;
+    const header = this.selected?.[0] === 'skills' ? ' Skills · read this turn' : ` Agent ${this.selected?.[0]} · ${this.selected?.[1]}`;
     const lines = [styledRow({ spans: [[header, 'model']] }, width, colors)];
     lines.push(...details.slice(this.detailOffset, this.detailOffset + Math.max(0, height - 2)));
     while (lines.length < height - 1) lines.push('');
-    lines.push(styledRow({ spans: [[' ↑↓ scroll · Esc back to HUD', 'dim']] }, width, colors));
+    const action = this.availableAction();
+    const en = this.snapshot.display?.language === 'en';
+    const hint = (en ? ' ↑↓ scroll · Esc back' : ' ↑↓ 滚动 · Esc 返回') + (action === 'stop' ? (en ? ' · S stop request' : ' · S 停止请求') : action === 'retry' ? (en ? ' · R retry request' : ' · R 重试请求') : '');
+    lines.push(styledRow({ spans: [[hint, 'dim']] }, width, colors));
     return lines;
   }
 }
@@ -504,7 +565,7 @@ async function run(runtime, options = {}) {
     if (closed || screen.pendingWrites || screen.terminal.modes.synchronizedOutputMode) return;
     resizeChild();
     const terminal = screen.terminal, buffer = terminal.buffer.active;
-    const overlay = controller.mode === 'detail' || controller.mode === 'config';
+    const overlay = ['detail', 'config', 'action'].includes(controller.mode);
     let lines = overlay ? controller.overlayLines(rows, cols) : screen.lines().concat(controller.hudLines(rows - mainRows, cols));
     lines = lines.slice(0, rows);
     while (lines.length < rows) lines.push('');
@@ -626,6 +687,11 @@ async function run(runtime, options = {}) {
           debug(`bridge packet type=${packet.type} rows=${packet.rows?.length}`);
           controller.update(packet);
           if (controller.root !== previousRoot) composer.reset();
+          const draft = controller.takeDraft(composer.empty());
+          if (draft !== null) {
+            const paste = `${CSI}200~${draft}${CSI}201~`;
+            forward(paste, { name: 'paste', raw: paste });
+          }
           scheduleRender();
         } catch (error) { log(`Bridge protocol: ${error.message}`); }
       });

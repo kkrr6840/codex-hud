@@ -45,6 +45,7 @@ def composer():
         print('\\x1b[2J\\x1b[HFixture READY\\r\\n› \\x1b[2mAsk Codex to do anything\\x1b[0m\\x1b[2;3H',end='',flush=True)
 composer()
 for line in sys.stdin:
+    with (home/'input.jsonl').open('a') as inputs: inputs.write(json.dumps(line)+'\\n')
     if line.strip()=='quit':break
     if line.strip()=='next':tokens(40)
     if line.strip()=='tool':
@@ -199,6 +200,64 @@ f.close()
         self.wait_for(lambda: not Path(spec["runtime"]).exists())
         self.assertNotEqual(self.tmux(spec, "has-session", "-t", "codex", check=False).returncode, 0)
         self.assertEqual(self.tmux(other, "has-session", "-t", "codex", check=False).returncode, 0)
+
+    @unittest.skipUnless(sys.platform == "darwin", "macOS BSD script PTY test")
+    def test_skills_details_and_agent_request_prepare_draft_without_submitting(self):
+        import sqlite3
+        from contextlib import closing
+        from codex_hud.agents import entries
+        from codex_hud.management import stamp, stage_request
+        self.env["HUD_TEST_COMPOSER"] = "1"
+        spec, proc = self.terminal()
+        self.wait_for(lambda: self.snapshot(spec).get("root", {}).get("id"))
+        root = self.snapshot(spec)["root"]["id"]
+        home = Path(spec["home"])
+        child = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+        path = home/"sessions"/"child.jsonl"
+        path.write_text(json.dumps({"type": "session_meta", "payload": {"id": child}})+"\n"+json.dumps({"type": "response_item", "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "management fixture output"}]}})+"\n")
+        with closing(sqlite3.connect(home/"state_5.sqlite")) as db, db:
+            db.executescript("CREATE TABLE threads(id TEXT,source TEXT,rollout_path TEXT,model TEXT,agent_nickname TEXT); CREATE TABLE thread_spawn_edges(parent_thread_id TEXT,child_thread_id TEXT,status TEXT);")
+            db.execute("INSERT INTO threads VALUES(?,?,?,?,?)", (root,"cli",str(next((home/'sessions').glob('rollout-*.jsonl'))),"fixture-model",None))
+            db.execute("INSERT INTO threads VALUES(?,?,?,?,?)", (child,"subagent",str(path),"child-model","managed-child"))
+            db.execute("INSERT INTO thread_spawn_edges VALUES(?,?,?)",(root,child,"open"))
+        Path(spec["diagnostic"]).write_text('INFO thread_spawn{x}:session_init:session_init.thread_persistence{session_init.ephemeral=false}: new\n'+f'INFO session_loop{{thread_id={root}}}: codex_core::session: new\n')
+        started = time.time()
+        with closing(sqlite3.connect(home/"thread_history_1.sqlite")) as db, db:
+            db.executescript("CREATE TABLE thread_turns(thread_id TEXT,turn_id TEXT,rollout_ordinal INTEGER,status TEXT,started_at REAL,completed_at REAL,duration_ms INTEGER); CREATE TABLE thread_items(thread_id TEXT,item_id TEXT,item_type TEXT,item_json TEXT,rollout_ordinal INTEGER,updated_at_ordinal INTEGER,created_at_ms INTEGER,completed_at_ms INTEGER,turn_id TEXT);")
+            for owner in (root,child):
+                db.execute("INSERT INTO thread_turns VALUES(?,?,?,?,?,?,?)",(owner,"turn-fixture",1,"inProgress",started,None,None))
+            item={"status":"completed","exitCode":0,"commandActions":[{"type":"read","path":"/fixture/skills/demo/SKILL.md"}],"aggregatedOutput":"---\nname: demo\ndescription: fixture skill description\n---\n"}
+            db.execute("INSERT INTO thread_items VALUES(?,?,?,?,?,?,?,?,?)",(root,"read-skill","commandExecution",json.dumps(item),2,2,int(started*1000),int(started*1000),"turn-fixture"))
+        self.wait_for(lambda: self.snapshot(spec).get("root",{}).get("skills")==["demo"])
+        before=json.loads((Path(spec["runtime"])/"runner.json").read_text())["pid"]
+        output=self.base/'terminal-0.log'
+        def shown(text):
+            import re
+            rendered=re.sub(r'\x1b(?:\[[0-?]*[ -/]*[@-~]|\([A-Za-z0-9])', '', output.read_text(errors='replace'))
+            return text in rendered
+        def popup():
+            return any(' _agents '+spec['runtime'] in line for line in subprocess.check_output(['ps','-axo','command='],text=True).splitlines())
+        def main_text():return self.tmux(spec,"capture-pane","-p","-t",spec['top']).stdout
+        proc.stdin.write(b'\x1b[B\r');proc.stdin.flush()
+        self.wait_for(lambda: shown('fixture skill description'))
+        self.assertTrue(shown('/fixture/skills/demo/SKILL.md'))
+        proc.stdin.write(b'\x1b');proc.stdin.flush();self.wait_for(lambda: not popup())
+        proc.stdin.write(b'\x1b[B\r');proc.stdin.flush()
+        self.wait_for(lambda: shown('management fixture output'))
+        proc.stdin.write(b's');proc.stdin.flush();self.wait_for(lambda: shown('Enter 生成请求草稿'))
+        proc.stdin.write(b'\x1b');proc.stdin.flush();time.sleep(.2)
+        self.assertNotIn('Codex HUD 子任务',main_text())
+        proc.stdin.write(b's\r');proc.stdin.flush();self.wait_for(lambda: not popup())
+        self.wait_for(lambda: 'Codex HUD' in main_text())
+        self.assertFalse((home/'input.jsonl').exists(), 'preparing must not submit a CLI input line')
+        current = next(i for i in entries(self.snapshot(spec)) if i['key']==('native',child))
+        self.assertEqual(current['status'],'running')
+        draft=main_text()
+        with self.assertRaises(ValueError):stage_request(spec['runtime'],root,current['key'],'stop',stamp(current))
+        self.assertEqual(main_text(),draft)
+        self.assertEqual(json.loads((Path(spec['runtime'])/'runner.json').read_text())['pid'],before)
+        proc.stdin.write(b'\x15\nquit\n');proc.stdin.flush()
+        self.wait_for(lambda: not Path(spec['runtime']).exists())
 
     @unittest.skipUnless(sys.platform == "darwin", "macOS BSD script PTY test")
     def test_closing_terminal_stops_owned_cli_tools_and_hud_but_keeps_history(self):
@@ -541,7 +600,7 @@ f.close()
             else:
                 # Exercise the actual prefix+Down binding on the attached client.
                 proc.stdin.write(b"\x02\x1b[B"); proc.stdin.flush()
-                self.wait_for(lambda: terminal_contains("Agent 选择器"))
+                self.wait_for(lambda: terminal_contains("子任务与 Skills"))
             self.wait_for(popup_pids)
             if not direct_agents:
                 proc.stdin.write(b"\r"); proc.stdin.flush()

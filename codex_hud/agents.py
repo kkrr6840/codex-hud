@@ -17,6 +17,12 @@ from .sources import database, read_json, Rollout, timestamp
 
 def entries(snapshot):
     result = []
+    root = snapshot.get("root") or {}
+    if root.get("skills"):
+        identity = root.get("skill_turn_id") or root.get("id")
+        result.append({"kind": "skills", "id": identity, "key": ("skills", identity),
+                       "name": "Skills", "records": root.get("skill_reads") or [], "names": root["skills"],
+                       "thread": root.get("id"), "turn_id": root.get("skill_turn_id")})
     for kind, items in (("native", snapshot.get("agents", [])),
                         ("relay", snapshot.get("offload", {}).get("jobs", []))):
         for item in items:
@@ -82,6 +88,17 @@ def transcript(home, entry):
 
 
 def details(home, item, now, en=False):
+    if item.get("kind") == "skills":
+        output = ["Skills · read this turn" if en else "Skills · 本轮已读",
+                  "These are recorded reads, not continuously running skills." if en else "这里显示本轮成功读取的技能说明。", ""]
+        records = item.get("records") or [{"name": name} for name in item.get("names", [])]
+        for skill in records:
+            output.extend([clean(skill.get("name") or "?"),
+                           ("Source: " if en else "来源：") + clean(skill.get("source") or "unknown"),
+                           ("Path: " if en else "路径：") + clean(skill.get("path") or ("not recorded" if en else "旧记录未保存路径")),
+                           ("Read at: " if en else "读取时间：") + (time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(skill["read_at"])) if skill.get("read_at") else "—"),
+                           ("Description: " if en else "说明：") + clean(skill.get("description") or ("No attributable description recorded." if en else "未记录可确认归属的说明。")), ""])
+        return output
     state = item.get("status", "unknown")
     title = item.get("name") or item.get("model") or item["id"]
     output = [f"{ICONS.get(state, '?')} {clean(title)} · {state if en else LABEL.get(state, state)} · {elapsed(item, now)}",
@@ -129,6 +146,7 @@ def wrapped(lines, width):
 
 
 def run(runtime, focus=None, root=None, detail=False):
+    from .management import actions, stamp, stage_request
     runtime = Path(runtime)
     spec = read_json(runtime / "spec.json", {})
     if not spec.get("home"):
@@ -143,6 +161,8 @@ def run(runtime, focus=None, root=None, detail=False):
         initial = read_json(runtime / "snapshot.json", {})
         identity = root or (initial.get("root") or {}).get("id")
         inline = bool(focus and detail)
+        history = not inline
+        pending, notice = None, ""
         selection, selected_key, expanded, scroll = 0, tuple(focus) if focus else None, detail, 0
         refreshed, snapshot, detail_key, body, palette = 0, {}, None, [], None
         while runtime.exists() and not (runtime / "exit.json").exists():
@@ -153,11 +173,15 @@ def run(runtime, focus=None, root=None, detail=False):
             if current != identity:
                 identity, selected_key, selection, expanded, scroll = current, None, 0, False, 0
                 inline = False
+                pending, notice = None, ""
             items = entries(snapshot)
+            if not expanded and not history:
+                items = [item for item in items if item.get("kind") == "skills" or item.get("status") not in ("completed", "failed") and not (item.get("status") == "unknown" and item.get("ended") is not None)]
             if selected_key:
                 match = next((i for i, item in enumerate(items) if item["key"] == selected_key), None)
                 if match is None:
                     selected_key, expanded, scroll = None, False, 0
+                    pending = None
                 else:
                     selection = match
             selection = min(selection, max(0, len(items)-1))
@@ -174,10 +198,16 @@ def run(runtime, focus=None, root=None, detail=False):
                         screen.addstr(y, 1, clip(value, width-2), attr)
                     except curses.error:
                         pass
-            line(0, "Codex HUD · Agents · read-only" if en else "Codex HUD · Agent 选择器 · 只读", curses.A_BOLD)
+            line(0, "Codex HUD · Tasks & Skills" if en else "Codex HUD · 子任务与 Skills", curses.A_BOLD)
             line(1, ("↑↓ scroll · Esc back to HUD · q back to input" if en else "↑↓ 滚动 · Esc 返回 HUD · q 返回输入") if inline else ("↑↓ scroll · Esc list · q close" if en else "↑↓ 滚动 · Esc 返回列表 · q 关闭") if expanded else ("↑↓ select · Enter inspect · Esc/q close" if en else "↑↓ 选择 · Enter 查看 · Esc/q 返回主会话"))
             room = max(1, height-4)
-            if expanded and items:
+            if pending:
+                line(1, "Enter prepare draft · Esc cancel" if en else "Enter 生成请求草稿 · Esc 取消")
+                label = "stop" if pending[1] == "stop" else "retry"
+                line(3, f"{label}: {clean(pending[0][1])}")
+                line(5, "The main conversation will handle this request after you send it." if en else "请求将放入主输入框；检查后按 Enter 发送，由主会话执行。")
+                line(7, "No task has been stopped or retried yet." if en else "生成草稿时，任务仍保持原状态。")
+            elif expanded and items:
                 current_detail = (identity, items[selection]["key"], snapshot.get("time"), en, width)
                 if current_detail != detail_key:
                     body = wrapped(details(spec["home"], items[selection], snapshot.get("time", time.time()), en), max(1, width-2))
@@ -185,19 +215,42 @@ def run(runtime, focus=None, root=None, detail=False):
                 scroll = min(scroll, max(0, len(body)-room))
                 for index, value in enumerate(body[scroll:scroll+room]):
                     line(index+3, value)
+                available = actions(items[selection])
+                hint = ("S stop request" if en else "S 停止请求") if "stop" in available else ("R retry request" if en else "R 重试请求") if "retry" in available else ""
+                line(2, notice or hint, curses.A_BOLD)
             elif items:
+                line(2, ("H toggle history · history shown" if history else "H toggle history · active only") if en else ("H 切换历史 · 当前包含历史" if history else "H 切换历史 · 当前仅活动任务"))
                 offset = max(0, selection-room+1)
                 for index, item in enumerate(items[offset:offset+room], offset):
                     title = item.get("name") or item.get("model") or item["id"]
-                    kind = item["kind"] if en else "原生" if item["kind"] == "native" else "分流"
+                    kind = "Skills" if item["kind"] == "skills" else item["kind"] if en else "原生" if item["kind"] == "native" else "分流"
                     state = item.get("status", "unknown")
-                    value = f"{ICONS.get(state, '?')} {kind} · {clean(title)} · {state if en else LABEL.get(state, state)} · {elapsed(item, snapshot.get('time', time.time()))}"
+                    value = ("Skills · " + " · ".join(map(clean, item["names"]))) if item["kind"] == "skills" else f"{ICONS.get(state, '?')} {kind} · {clean(title)} · {state if en else LABEL.get(state, state)} · {elapsed(item, snapshot.get('time', time.time()))}"
                     attr = curses.A_REVERSE | curses.A_BOLD if index == selection else curses.color_pair(COLORS[STATE_COLOR.get(state, "muted")])
                     line(index-offset+3, value, attr)
             else:
                 line(3, "No agents in this conversation yet." if en else "当前会话暂无子 agent 或分流任务；出现后自动列出。")
             screen.refresh()
             key = screen.getch()
+            if pending:
+                if key in (27, ord("q")):
+                    pending, notice = None, ""
+                elif key in (10, 13, curses.KEY_ENTER):
+                    try:
+                        stage_request(runtime, identity, *pending)
+                        return "main"
+                    except (OSError, ValueError, sqlite3.Error, subprocess.SubprocessError) as error:
+                        notice, pending = str(error), None
+                continue
+            if expanded and items and key in (ord("s"), ord("S"), ord("r"), ord("R")):
+                action = "stop" if key in (ord("s"), ord("S")) else "retry"
+                if action in actions(items[selection]):
+                    pending = (items[selection]["key"], action, stamp(items[selection]))
+                    notice = ""
+                continue
+            if not expanded and key in (ord("h"), ord("H")):
+                history, selected_key, selection = not history, None, 0
+                continue
             if key == ord("q") or (key == 27 and not expanded):
                 return "main"
             if key == 27 and inline:

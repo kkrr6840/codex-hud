@@ -105,6 +105,54 @@ test('empty Down selects in HUD, arrows move, Enter requests detail and two Esc 
   assert.equal(controller.mode, 'cli');
 });
 
+test('skill selection and task requests stay scoped, cancellable and draft-only', () => {
+  const requests = [], c = new hud.HudController(r => requests.push(r));
+  const p = packet();
+  p.snapshot.agents = [{ id: 'a', status: 'running', turn_id: 't', started: 10 }];
+  c.update(p); c.enterHud(); c.input(input('\r', 'enter'), true);
+  c.input(input('s', 'other'), true);
+  assert.equal(c.mode, 'action');
+  assert.equal(requests.filter(r => r.type === 'action').length, 0);
+  c.input(input('\r', 'enter'), true); c.input(input('\r', 'enter'), true);
+  const first = requests.at(-1);
+  assert.equal(requests.filter(r => r.type === 'action').length, 1);
+  c.input(input('\x1b', 'escape'), true);
+  c.update({ ...first, draft: 'stale request' }); assert.equal(c.takeDraft(true), null);
+  c.input(input('s', 'other'), true); c.input(input('\r', 'enter'), true);
+  c.update({ ...requests.at(-1), draft: 'stop child a' });
+  assert.equal(c.takeDraft(false), null); assert.equal(c.mode, 'action');
+  assert.match(c.actionError, /not empty/);
+  c.input(input('\r', 'enter'), true); c.update({ ...requests.at(-1), draft: 'stop child a' });
+  assert.equal(c.takeDraft(true), 'stop child a'); assert.equal(c.mode, 'cli');
+  assert.equal(c.takeDraft(true), null);
+  c.enterHud(); c.input(input('\r', 'enter'), true); c.input(input('s', 'other'), true); c.input(input('\r', 'enter'), true);
+  const obsolete = requests.at(-1);
+  c.update(packet('other-root')); c.update({ ...obsolete, draft: 'wrong conversation' });
+  assert.equal(c.takeDraft(true), null); assert.equal(c.pendingAction, null);
+  const skill = { spans: [['Skills demo', 'agent']], key: ['skills', 'turn-1'] };
+  const skills = packet('root-a', [skill]);
+  skills.snapshot.root.skills = ['demo']; skills.snapshot.root.skill_turn_id = 'turn-1';
+  c.update(skills); c.enterHud(); c.input(input('\r', 'enter'), true);
+  assert.equal(c.selectedItem().kind, 'skills'); assert.equal(c.availableAction(), null);
+  c.update({ ...requests.at(-1), lines: ['Path: /skills/demo/SKILL.md'] });
+  assert.match(c.overlayLines(10, 80).join('\n'), /SKILL.md/);
+  c.input(input('s', 'other'), true); assert.equal(c.mode, 'detail');
+  skills.snapshot.root.skill_turn_id = 'turn-2'; skills.rows = []; skills.all_rows = [];
+  c.update(skills); assert.equal(c.mode, 'cli');
+});
+
+test('prefix Down exposes task history without changing normal visibility', () => {
+  const c = new hud.HudController(), p = packet('root-a', []);
+  p.history_rows = [row('completed child', 'a')]; p.snapshot.agents = [{ id: 'a', status: 'completed' }];
+  c.update(p); assert.equal(c.enterHud(), false);
+  c.input(input('\x02', 'prefix'), true); c.input(input(`${CSI}B`, 'down'), true);
+  assert.equal(c.mode, 'hud'); assert.deepEqual(c.selected, ['native', 'a']);
+  assert.equal(c.availableAction(), 'retry');
+  p.snapshot.agents[0].status = 'idle'; p.snapshot.agents[0].ended = 20; c.update(p);
+  assert.equal(c.availableAction(), 'retry', 'cancelled tasks with an end time can be retried');
+  c.input(input('\x1b', 'escape'), true); assert.equal(c.enterHud(), false);
+});
+
 test('config waits for matching success, prevents duplicates and retries failures', () => {
   const requests = [], controller = new hud.HudController(request => requests.push(request));
   controller.update(packet()); controller.enterHud();
@@ -398,8 +446,8 @@ process.stdin.on('data',data=>{ log({input:data}); const text=data.replace(/\\x1
 const fs=require('node:fs'); const readline=require('node:readline'); let tick=0;
 const log=value=>fs.appendFileSync(${JSON.stringify(bridgeLog)},JSON.stringify(value)+'\\n'); log({pid:process.pid});
 const emit=value=>process.stdout.write(JSON.stringify(value)+'\\n');
-function update(){ const hidden=fs.existsSync(${JSON.stringify(path.join(base, 'hide'))}); const switched=fs.existsSync(${JSON.stringify(path.join(base, 'switch'))}); emit({type:'snapshot',snapshot:{root:{id:switched?'root-b':'root-a'},display:{height:6,language:'en'}},rows:hidden?[]:${JSON.stringify(packet().rows)},all_rows:hidden?[]:${JSON.stringify(packet().rows)}}); }
-readline.createInterface({input:process.stdin}).on('line',line=>{ const req=JSON.parse(line); log(req); if(req.type==='detail')emit({...req,lines:['Live agent output '+(++tick)]}); });
+function update(){ const hidden=fs.existsSync(${JSON.stringify(path.join(base, 'hide'))}); const switched=fs.existsSync(${JSON.stringify(path.join(base, 'switch'))}); const skills=fs.existsSync(${JSON.stringify(path.join(base, 'skills'))}); const rows=hidden?[]:skills?[{spans:[['Skills demo','agent']],key:['skills','skill-turn']}]:${JSON.stringify(packet().rows)}; emit({type:'snapshot',snapshot:{root:{id:switched?'root-b':'root-a',skills:skills?['demo']:[],skill_turn_id:'skill-turn'},agents:[{id:'a',status:'running',turn_id:'test-turn',started:1}],display:{height:6,language:'en'}},rows,all_rows:rows}); }
+readline.createInterface({input:process.stdin}).on('line',line=>{ const req=JSON.parse(line); log(req); if(req.type==='detail')emit({...req,lines:[req.key[0]==='skills'?'Skill source /fixture/SKILL.md':'Live agent output '+(++tick)]}); if(req.type==='action')emit({...req,draft:'HUD request for '+req.key[1]}); });
 setTimeout(update,150); setInterval(update,150);
 `);
   fs.writeFileSync(path.join(runtime, 'spec.json'), JSON.stringify({ runtime, home: base, cwd: base, argv: [process.execPath, fakeCli],
@@ -440,6 +488,19 @@ setTimeout(update,150); setInterval(update,150);
     outer.write('\r');
     await until(() => visible().includes('Live agent output'), 'Enter opened real bridge detail');
     await until(() => requests().filter(req => req.type === 'detail').length >= 2, 'detail refreshed from live snapshots');
+    outer.write('s'); await until(() => visible().includes('prepare draft'), 'stop request confirmation visible');
+    outer.write('\x1b'); await until(() => visible().includes('Live agent output'), 'cancel returns to task details');
+    assert.equal(requests().filter(req => req.type === 'action').length, 0);
+    outer.write('s'); await until(() => visible().includes('prepare draft'), 'confirm view reopened');
+    const inputBefore = inputs().length;
+    outer.write('\r'); await until(() => visible().includes('› HUD request for a'), 'request staged in native composer');
+    assert.equal(inputs().slice(inputBefore), `${CSI}200~HUD request for a${CSI}201~`, 'draft paste has no submit key');
+    outer.write('\x7f'.repeat('HUD request for a'.length)); await until(() => visible().includes('› Ask Codex'), 'request draft erased');
+    fs.writeFileSync(path.join(base, 'skills'), '1'); await until(() => visible().includes('Skills demo'), 'skill row shown');
+    outer.write(`${CSI}B\r`); await until(() => visible().includes('Skill source /fixture/SKILL.md'), 'skill details work through real PTY');
+    outer.write('\x1b'); await wait(100); outer.write('\x1b'); await wait(100);
+    fs.unlinkSync(path.join(base, 'skills')); await until(() => visible().includes('agent Alpha'), 'agent rows restored');
+    outer.write(`${CSI}B\r`); await until(() => visible().includes('Live agent output'), 'agent details reopened');
     outer.write('\x1b'); await until(selected, 'first Esc returned to HUD selection');
     outer.write('\x1b'); await wait(100);
     outer.write(`z${CSI}B`);

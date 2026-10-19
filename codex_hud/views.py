@@ -211,7 +211,8 @@ class View:
             names = " · ".join(clip(clean(name), 32) for name in skills[:limit])
             if len(skills) > limit:
                 names += f" +{len(skills)-limit}"
-            self.put("skills", [(" Skills ", "model"), (self.tr("本轮已读 ", "read this turn ", "本輪已讀 "), "muted"), (names, "agent")])
+            self.put("skills", [(" Skills ", "model"), (self.tr("本轮已读 ", "read this turn ", "本輪已讀 "), "muted"), (names, "agent")],
+                     key=("skills", self.root.get("skill_turn_id") or self.root.get("id")))
         tools = self.root.get("tools") or []
         if self.show["tools"] and tools:
             active = [t for t in tools if t["status"] == "running"]
@@ -310,10 +311,11 @@ class View:
                 same_group = any(previous in group and section in group for group in self.c["merge_groups"])
                 merge = result and ((self.c["layout"] == "compact" and section in ("context", "quota", "tokens", "cache", "session")) or same_group or (section == previous == "quota" and self.c["quota_style"] == "compact"))
                 gap = " │ " if self.c["separators"] else "  "
-                if merge and not row.key and not result[-1].key and cell_width(result[-1].text + gap + row.text.lstrip()) < self.width:
+                if merge and (not row.key or row.key[0] == "skills") and not result[-1].key and cell_width(result[-1].text + gap + row.text.lstrip()) < self.width:
                     if section in self.c["right_align"]:
                         gap = " " * max(len(gap), self.width-1-cell_width(result[-1].text)-cell_width(row.text.lstrip()))
                     result[-1].spans += [(gap, "dim"), *[(text.lstrip() if i == 0 else text, color) for i, (text, color) in enumerate(row.spans)]]
+                    result[-1].key = row.key
                 else:
                     result.append(row)
                 previous = section
