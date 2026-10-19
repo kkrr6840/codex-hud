@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
 try:
     import curses
 except ImportError:  # Native Windows renders through ConPTY, not curses.
@@ -80,6 +81,35 @@ def attach_client_command(socket, session, flags, sync=True):
     return "exec " + shlex.join(argv)
 
 
+def configure_lifetime(spec):
+    """Arm terminal-owned sessions only after a client actually attaches.
+
+    Setup itself creates a detached session. Explicit --detach launches retain
+    their background lifetime; older interactive runtimes adopt the new policy.
+    tmux owns disconnect handling, so even a killed launcher cannot orphan it.
+    """
+    if not spec.get("close_on_disconnect", True):
+        return
+    socket = spec["socket"]
+    tmux(socket, "set-hook", "-t", "codex", "client-attached[90]",
+         "set-option -t codex destroy-unattached on")
+    tmux(socket, "if-shell", "-F", "-t", "codex", "#{session_attached}",
+         "set-option -t codex destroy-unattached on")
+
+
+@contextmanager
+def preserve_display_reconnect(socket):
+    """A capability refresh briefly detaches the only display client."""
+    closing = tmux(socket, "show-options", "-A", "-v", "-t", "codex", "destroy-unattached").stdout.strip() == "on"
+    if closing:
+        tmux(socket, "set-option", "-t", "codex", "destroy-unattached", "off")
+    try:
+        yield
+    finally:
+        if closing:
+            tmux(socket, "set-option", "-t", "codex", "destroy-unattached", "on", check=False)
+
+
 def unwrap_owned_parent(spec):
     """Connect a visible parent HUD client directly to this HUD's session.
 
@@ -97,6 +127,10 @@ def unwrap_owned_parent(spec):
     parent_dir = Path(spec["runtime"]).parent / parent_name
     parent = read_json(parent_dir / "spec.json", {})
     if parent.get("socket") != parent_name or parent.get("runtime") != str(parent_dir) or parent.get("home") != spec["home"] or parent_dir.stat().st_uid != os.getuid():
+        return []
+    # Removing the last display would close a terminal-owned parent and its
+    # nested client. Only persistent parents can safely shed this display layer.
+    if tmux(parent_name, "show-options", "-A", "-v", "-t", "codex", "destroy-unattached", check=False).stdout.strip() == "on":
         return []
     parent_tty = tmux(parent_name, "display-message", "-p", "-t", pane, "#{pane_tty}", check=False).stdout.strip()
     if not parent_tty.startswith("/dev/"):
@@ -145,15 +179,16 @@ def reconnect_unsynced_clients(spec):
         name, terminal, features, session, readonly, control, flags = values
         if not terminal.startswith("tmux") or "sync" in features.split(",") or readonly != "0" or control != "0" or not session or "suspended" in flags.split(","):
             continue
-        tmux(socket, "detach-client", "-t", name, "-E", attach_client_command(socket, session, flags))
-        for _ in range(40):
-            current = tmux(socket, "list-clients", "-F", "#{client_name}\t#{client_termfeatures}").stdout.splitlines()
-            if any(row.split("\t", 1)[0] == name and "sync" in row.split("\t", 1)[-1].split(",") for row in current):
-                updated.append(name)
-                break
-            time.sleep(.05)
-        else:
-            raise RuntimeError("终端显示连接未恢复；主 CLI 和会话仍保留")
+        with preserve_display_reconnect(socket):
+            tmux(socket, "detach-client", "-t", name, "-E", attach_client_command(socket, session, flags))
+            for _ in range(40):
+                current = tmux(socket, "list-clients", "-F", "#{client_name}\t#{client_termfeatures}").stdout.splitlines()
+                if any(row.split("\t", 1)[0] == name and "sync" in row.split("\t", 1)[-1].split(",") for row in current):
+                    updated.append(name)
+                    break
+                time.sleep(.05)
+            else:
+                raise RuntimeError("终端显示连接未恢复")
     return updated
 
 
@@ -216,10 +251,17 @@ def launch(argv):
     arguments = [executable, "--no-daemon", "-c", f"log_dir={json.dumps(str(log_dir))}", *cli_args]
     spec = {"socket": socket, "runtime": str(runtime), "home": home,
             "cwd": os.getcwd(), "argv": arguments, "hud_height": options.hud_height,
+            "close_on_disconnect": not options.detach,
             "diagnostic": str(log_dir / "codex-tui.log")}
     atomic_json(runtime / "spec.json", spec)
     attached = False
     watcher = None
+    previous_signals = {}
+    if not options.detach:
+        def terminal_closed(signum, frame):
+            raise SystemExit(128 + signum)
+        for signum in (signal.SIGHUP, signal.SIGTERM):
+            previous_signals[signum] = signal.signal(signum, terminal_closed)
     try:
         created = tmux(socket, "-f", "/dev/null", "new-session", "-d", "-s", "codex",
                        "-x", options.width, "-y", options.height, "-c", os.getcwd(),
@@ -242,6 +284,7 @@ def launch(argv):
         tmux(socket, "bind-key", "H", "run-shell", command("_toggle", runtime, runtime=runtime))
         bind_settings(spec)
         bind_agents(spec)
+        configure_lifetime(spec)
         tmux(socket, "select-pane", "-t", spec["top"])
         watcher = subprocess.Popen([sys.executable, str(runtime_entry(runtime)), "_watch", str(runtime)],
                                    stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
@@ -265,7 +308,6 @@ def launch(argv):
         outcome = read_json(runtime / "exit.json", {})
         if outcome:
             return outcome.get("code", result.returncode)
-        print(f"HUD 已分离，重新进入：tmux -L {socket} attach-session -t codex")
         return result.returncode
     except (OSError, subprocess.SubprocessError) as error:
         tmux(socket, "kill-server", check=False)
@@ -273,10 +315,15 @@ def launch(argv):
         print(f"HUD 启动失败：{error}", file=sys.stderr)
         return 1
     finally:
-        # Ctrl-b d intentionally leaves the owned session running for reattachment.
-        if attached and (runtime / "exit.json").exists():
+        # Cover terminal closure during setup too, before the attach hook arms.
+        cleanup = attached and (runtime / "exit.json").exists()
+        if not options.detach and (not attached or not tmux(socket, "list-clients", check=False).stdout.strip()):
+            cleanup = True
+        if cleanup:
             tmux(socket, "kill-server", check=False)
             shutil.rmtree(runtime, ignore_errors=True)
+        for signum, handler in previous_signals.items():
+            signal.signal(signum, handler)
 
 
 def runner(runtime):
@@ -299,17 +346,25 @@ def runner(runtime):
     env["RUST_LOG"] = env.get("RUST_LOG", "warn") + ",codex_core::session=info"
     child = None
     code = 1
+    stopped = None
+    class PaneClosed(Exception):
+        pass
     def stop(signum, frame):
-        # The runner and its CLI share this pane's process group. tmux's pane
-        # teardown also sends HUP; forward it to the direct child promptly.
-        if child and child.poll() is None:
-            child.send_signal(signum)
+        nonlocal stopped
+        if stopped is None:
+            stopped = signum
+            if child and child.poll() is None:
+                child.send_signal(signum)
+            # Leave wait() even if the CLI ignores HUP, so shutdown is bounded.
+            raise PaneClosed
     signal.signal(signal.SIGHUP, stop)
     signal.signal(signal.SIGTERM, stop)
     try:
         child = subprocess.Popen(spec["argv"], cwd=spec["cwd"], env=env, start_new_session=False)
         atomic_json(runtime / "runner.json", {"pid": child.pid, "started": time.time()})
         code = child.wait()
+    except PaneClosed:
+        code = 128 + stopped
     except KeyboardInterrupt:
         code = 130
     except OSError as error:
@@ -322,7 +377,15 @@ def runner(runtime):
             except subprocess.TimeoutExpired:
                 child.kill()
                 child.wait()
-        atomic_json(runtime / "exit.json", {"code": code, "time": time.time()})
+        if stopped and os.getpgrp() == os.getpid():
+            # The private pane owns this process group. tmux HUP alone can
+            # leave ordinary tool children orphaned after their CLI exits.
+            os.killpg(os.getpgrp(), signal.SIGTERM)
+        try:
+            atomic_json(runtime / "exit.json", {"code": code, "time": time.time()})
+        except FileNotFoundError:
+            if not stopped:
+                raise
     return code
 
 
@@ -617,10 +680,12 @@ def refresh_panels(argv):
         bind_agents(spec)
         unwrapped = unwrap_owned_parent(spec)
         reconnected = reconnect_unsynced_clients(spec)
+        configure_lifetime(spec)
         after = tmux(socket, "display-message", "-p", "-t", spec["top"], "#{pane_pid}").stdout.strip()
         if before != after:
             raise RuntimeError("CLI pane identity changed while refreshing HUD")
         updated.append({"runtime": str(runtime), "cli_pid": before, "reconnected_clients": reconnected, "unwrapped_clients": unwrapped,
+                        "close_on_disconnect": spec.get("close_on_disconnect", True),
                         "settings_shortcut": "F10" if f10_bound else "Ctrl-b C"})
     print(json.dumps({"updated": updated}, ensure_ascii=False))
     return 0 if updated else 1

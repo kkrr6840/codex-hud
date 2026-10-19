@@ -21,9 +21,11 @@ class TmuxTest(unittest.TestCase):
         self.bin.mkdir()
         fixture = self.bin / "codex"
         fixture.write_text(f"#!{sys.executable}\n" + '''
-import json,os,pathlib,sys,time,uuid,sqlite3
+import json,os,pathlib,sys,time,uuid,sqlite3,subprocess,signal
 if '--help' in sys.argv:
     print('fixture help');sys.exit(0)
+if '--fixture-ignore-signals' in sys.argv:
+    signal.signal(signal.SIGHUP,signal.SIG_IGN);signal.signal(signal.SIGTERM,signal.SIG_IGN)
 home=pathlib.Path(os.environ['CODEX_HOME']);folder=home/'sessions';folder.mkdir(parents=True,exist_ok=True)
 identity=str(uuid.uuid4());f=(folder/f'rollout-{identity}.jsonl').open('a')
 def emit(kind,payload):
@@ -45,6 +47,9 @@ composer()
 for line in sys.stdin:
     if line.strip()=='quit':break
     if line.strip()=='next':tokens(40)
+    if line.strip()=='tool':
+        tool=subprocess.Popen([sys.executable,'-c','import time;time.sleep(300)'],stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+        (home/'tool.pid').write_text(str(tool.pid))
     if line.strip()=='reset':
         f.close();identity=str(uuid.uuid4());f=(folder/f'rollout-{identity}.jsonl').open('a')
         emit('session_meta',{'id':identity,'source':'cli','cwd':str(pathlib.Path.cwd())})
@@ -82,6 +87,29 @@ f.close()
         spec = json.loads(result.stdout)
         self.instances.append(spec)
         return spec
+
+    def terminal(self, spec=None, *args):
+        runtimes = self.base / "runtimes"
+        runtimes.mkdir(exist_ok=True)
+        argv = (["tmux", "-L", spec["socket"], "attach-session", "-t", "codex"] if spec else
+                [sys.executable, str(ENTRY), "--", *args])
+        output = (self.base / f"terminal-{len(self.pty_children)}.log").open("wb")
+        proc = subprocess.Popen(["/usr/bin/script", "-q", "/dev/null", *argv], cwd=self.base,
+                                env=dict(self.env, TERM="xterm-256color", CODEX_HUD_RUNTIME_DIR=str(runtimes)),
+                                stdin=subprocess.PIPE, stdout=output, stderr=subprocess.STDOUT)
+        self.pty_children.append((proc, output))
+        if spec is None:
+            self.wait_for(lambda: list(runtimes.glob("codex-hud-*/runner.json")))
+            path = next(runtimes.glob("codex-hud-*/spec.json"))
+            spec = json.loads(path.read_text())
+            self.instances.append(spec)
+        self.wait_for(lambda: self.tmux(spec, "list-clients", "-F", "#{client_name}").stdout.strip())
+        return spec, proc
+
+    @staticmethod
+    def alive(pid):
+        result = subprocess.run(["ps", "-p", str(pid), "-o", "stat="], capture_output=True, text=True)
+        return result.returncode == 0 and not result.stdout.lstrip().startswith("Z")
 
     def tmux(self, spec, *args, check=True):
         return subprocess.run(["tmux", "-L", spec["socket"], *args], capture_output=True, text=True, check=check, timeout=5)
@@ -162,6 +190,79 @@ f.close()
         self.tmux(spec, "kill-server")
         self.wait_for(lambda: not Path(spec["runtime"]).exists())
 
+    @unittest.skipUnless(sys.platform == "darwin", "macOS BSD script PTY test")
+    def test_closing_terminal_stops_owned_cli_tools_and_hud_but_keeps_history(self):
+        other = self.launch()
+        spec, proc = self.terminal()
+        self.wait_for(lambda: self.snapshot(spec).get("root", {}).get("id"))
+        runtime = Path(spec["runtime"])
+        cli = json.loads((runtime / "runner.json").read_text())["pid"]
+        panes = [int(pid) for pid in self.tmux(spec, "list-panes", "-a", "-F", "#{pane_pid}").stdout.splitlines()]
+        self.assertEqual(self.tmux(spec, "show-options", "-v", "-t", "codex", "destroy-unattached").stdout.strip(), "on")
+        self.send(spec, "tool")
+        tool_file = Path(spec["home"]) / "tool.pid"
+        self.wait_for(tool_file.exists)
+        tool = int(tool_file.read_text())
+        self.assertTrue(self.alive(tool))
+        history = list((Path(spec["home"]) / "sessions").glob("*.jsonl"))
+        # Close the outer PTY abruptly, as when a terminal tab is closed. No
+        # /quit, detach command, or kill-server is sent to the private server.
+        proc.kill()
+        proc.wait(timeout=5)
+        self.wait_for(lambda: not runtime.exists())
+        for pid in [cli, tool, *panes]:
+            self.wait_for(lambda pid=pid: not self.alive(pid))
+        self.wait_for(lambda: not any(spec["runtime"] in line for line in subprocess.check_output(["ps", "-axo", "command="], text=True).splitlines()))
+        self.assertNotEqual(self.tmux(spec, "has-session", "-t", "codex", check=False).returncode, 0)
+        self.assertTrue(all(path.exists() and path.stat().st_size for path in history))
+        self.assertEqual(self.tmux(other, "has-session", "-t", "codex", check=False).returncode, 0)
+
+    @unittest.skipUnless(sys.platform == "darwin", "macOS BSD script PTY test")
+    def test_closing_terminal_bounds_shutdown_even_if_cli_ignores_signals(self):
+        spec, proc = self.terminal(None, "--fixture-ignore-signals")
+        self.wait_for(lambda: self.snapshot(spec).get("root", {}).get("id"))
+        cli = json.loads((Path(spec["runtime"]) / "runner.json").read_text())["pid"]
+        proc.kill(); proc.wait(timeout=5)
+        self.wait_for(lambda: not self.alive(cli))
+        self.wait_for(lambda: not Path(spec["runtime"]).exists())
+
+    @unittest.skipUnless(sys.platform == "darwin", "macOS BSD script PTY test")
+    def test_only_the_last_terminal_closes_session_and_explicit_detach_persists(self):
+        spec, first = self.terminal()
+        _, second = self.terminal(spec)
+        self.wait_for(lambda: len(self.tmux(spec, "list-clients").stdout.splitlines()) == 2)
+        cli = json.loads((Path(spec["runtime"]) / "runner.json").read_text())["pid"]
+        first.kill(); first.wait(timeout=5)
+        self.wait_for(lambda: len(self.tmux(spec, "list-clients").stdout.splitlines()) == 1)
+        self.assertTrue(self.alive(cli))
+        second.stdin.write(b"next\n"); second.stdin.flush()
+        self.wait_for(lambda: self.snapshot(spec).get("root", {}).get("context_used") == 40)
+        second.kill(); second.wait(timeout=5)
+        self.wait_for(lambda: not Path(spec["runtime"]).exists())
+        persistent = self.launch()
+        _, client = self.terminal(persistent)
+        client.kill(); client.wait(timeout=5)
+        self.wait_for(lambda: not self.tmux(persistent, "list-clients").stdout.strip())
+        self.assertEqual(self.tmux(persistent, "show-options", "-A", "-v", "-t", "codex", "destroy-unattached").stdout.strip(), "off")
+        self.send(persistent, "next")
+        self.wait_for(lambda: self.snapshot(persistent).get("root", {}).get("context_used") == 40)
+
+    @unittest.skipUnless(sys.platform == "darwin", "macOS BSD script PTY test")
+    def test_refresh_enables_terminal_cleanup_for_legacy_runtime(self):
+        spec = self.launch()
+        spec.pop("close_on_disconnect")
+        (Path(spec["runtime"]) / "spec.json").write_text(json.dumps(spec))
+        _, client = self.terminal(spec)
+        self.wait_for(lambda: self.snapshot(spec).get("root", {}).get("id"))
+        before = json.loads((Path(spec["runtime"]) / "runner.json").read_text())["pid"]
+        result = subprocess.run([sys.executable, str(ENTRY), "refresh", "--session", self.snapshot(spec)["root"]["id"]],
+                                env=self.env, capture_output=True, text=True, timeout=15)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(json.loads(result.stdout)["updated"][0]["close_on_disconnect"])
+        self.assertEqual(json.loads((Path(spec["runtime"]) / "runner.json").read_text())["pid"], before)
+        client.kill(); client.wait(timeout=5)
+        self.wait_for(lambda: not Path(spec["runtime"]).exists())
+
     def test_empty_hud_is_hidden_and_returns_only_when_data_arrives(self):
         spec = self.launch("--fixture-empty-start")
         def window(pane):
@@ -219,6 +320,10 @@ f.close()
     def test_refresh_old_nested_client_preserves_draft_cursor_and_cli_process(self):
         self.env["HUD_TEST_COMPOSER"] = "1"
         spec = self.launch()
+        from codex_hud.cli import configure_lifetime
+        spec["close_on_disconnect"] = True
+        (Path(spec["runtime"]) / "spec.json").write_text(json.dumps(spec))
+        configure_lifetime(spec)
         # Reproduce an existing client attached before sync support was set.
         self.tmux(spec, "set-option", "-s", "terminal-features", "")
         output_path = self.base / "old-terminal-output.log"
@@ -255,6 +360,7 @@ f.close()
         proc.stdin.write(b"Z"); proc.stdin.flush()
         self.wait_for(lambda: draft+"Z" in self.tmux(spec, "capture-pane", "-p", "-t", spec["top"]).stdout)
         self.assertIsNone(proc.poll())
+        self.assertEqual(self.tmux(spec, "show-options", "-v", "-t", "codex", "destroy-unattached").stdout.strip(), "on")
         proc.stdin.write(b"\nquit\n"); proc.stdin.flush()
         self.wait_for(lambda: not Path(spec["runtime"]).exists())
 

@@ -104,6 +104,8 @@ The `codex-hud` command above requires the standalone entry on your PATH. With o
 
 Preferences are stored in `~/.config/codex-hud/display.json`. An optional `override.json` takes precedence and is preserved during normal configuration. On macOS, **Ctrl-b H** expands or collapses the panel; arrows or `j` / `k` scroll it. Quit normally with `/quit` on either platform.
 
+Starting with v0.7.10, normal macOS launches end when their last terminal connection closes: closing a window or iTerm2 tab, quitting iTerm2, or using `Ctrl-b d` stops that HUD's CLI and panel, including ordinary tool processes in the same pane process group. Saved conversations remain available through `codex resume`. Another terminal connected to the same HUD keeps it alive. Explicit `codex-hud --detach` launches retain their background lifetime. The hud skill can apply this policy to an existing Mac session without restarting its CLI; display refreshes preserve the CLI and draft.
+
 After an upgrade, the hud skill can refresh the macOS observer while keeping the main CLI running. Starting with v0.6.3, open macOS sessions keep their panel, arrow navigation, and menus working even when the plugin manager removes the old version's cache. No session restart is needed. Windows backend upgrades apply on the next normal launch; display preferences update live on both platforms.
 
 ## Select agents directly (v0.6)
@@ -141,7 +143,7 @@ Codex HUD uses a private tmux session on macOS and a native ConPTY terminal host
 
 Starting with v0.4.2, the private server enables synchronized updates for an outer tmux terminal and uses an explicit steady cursor in the CLI pane. Starting with v0.7.5, refresh replaces an old nested display connection when its cached capabilities still lack synchronized updates. The CLI, session, typed draft and cursor position remain intact; the screen may briefly redraw once without reopening the conversation. Already synchronized, read-only, control-mode and suspended clients are not reconnected automatically.
 
-Starting with v0.7.6, refresh can connect a visible terminal directly to the current session when it was nested inside another private HUD owned by this plugin. This removes one scroll/redraw forwarding layer while keeping both CLI processes and their history. Personal tmux servers, other windows and protected clients are preserved. Existing Windows sessions load the new menu code on the next normal launch; Esc still returns from the current menu.
+Starting with v0.7.6, refresh can connect a visible terminal directly to the current session when it was nested inside another private HUD owned by this plugin. Starting with v0.7.10, this requires a persistent parent HUD so both CLIs can remain alive; a parent that closes with its terminal keeps its existing connection. Saved history, personal tmux servers, other windows and protected clients are preserved. Existing Windows sessions load the new menu code on the next normal launch; Esc still returns from the current menu.
 
 ## Disable or remove
 
