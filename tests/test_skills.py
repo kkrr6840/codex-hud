@@ -47,6 +47,10 @@ class SkillReadTest(unittest.TestCase):
             item = self.item([{"type": "unknown", "command": f"cat {path}"}])
             self.assertEqual(read_skill_records(item)[0]["path"], path)
 
+    def test_posix_escaped_spaces_keep_the_complete_source_path(self):
+        item = self.item([{"type": "unknown", "command": r"cat /tmp/my\ skills/hud/SKILL.md"}])
+        self.assertEqual(read_skill_records(item)[0]["path"], "/tmp/my skills/hud/SKILL.md")
+
     def test_no_records_without_successful_nonempty_command_output(self):
         item = self.item([{"type": "read", "path": "/hud/SKILL.md"}])
         for extra in ({"exitCode": 1}, {"exitCode": None}, {"status": "inProgress"},

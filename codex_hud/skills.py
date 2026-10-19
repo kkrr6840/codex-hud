@@ -67,7 +67,10 @@ def _command_paths(command):
     lexer = shlex.shlex(command, posix=True, punctuation_chars=";\n|&<>")
     lexer.whitespace = " \t\r"
     lexer.whitespace_split = True
-    lexer.escape = ""  # Preserve Windows path separators verbatim.
+    # Backslashes before SKILL.md identify Windows-style separators. Otherwise
+    # retain POSIX escaping so `/my\ skills/hud/SKILL.md` stays one full path.
+    windows_paths = re.search(r"\\SKILL\.md(?:['\"]|\s|$)", command) or command.lstrip().startswith("Get-Content ")
+    lexer.escape = "" if windows_paths else "\\"
     try:
         tokens = list(lexer)
     except ValueError:
