@@ -319,6 +319,14 @@ class View:
                 else:
                     result.append(row)
                 previous = section
+        # A live Main destination precedes every selectable record, regardless
+        # of custom section order. An uninitialized HUD stays completely hidden.
+        if result and self.root.get("id") and self.show.get("main_agent", True):
+            index = next((i for i, row in enumerate(result) if row.key), len(result))
+            result.insert(index, Row([(" Main agent", "model"),
+                                     (" · " + self.tr("主会话", "live conversation", "主會話"), "muted"),
+                                     (" · ↑↓ " + self.tr("切换", "switch", "切換"), "dim")],
+                                    key=("main", self.root["id"])))
         for error in self.s.get("errors", []):
             result.append(Row([(" ! " + clean(error), "warn")]))
         if self.show["git"] and self.s["git"].get("error"):

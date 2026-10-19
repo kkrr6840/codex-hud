@@ -12,13 +12,14 @@ const { Terminal, pty } = hud.loadDependencies();
 const CSI = '\x1b[';
 const prompt = `${CSI}2J${CSI}10;1H› ${CSI}2mAsk Codex to do anything${CSI}0m${CSI}10;3H${CSI}?25h`;
 const row = (text, id, pinned = false) => ({ spans: [[text, id ? 'agent' : 'model']], pinned, key: id ? ['native', id] : null });
+const mainRow = root => ({ spans: [['Main agent', 'agent']], key: ['main', root] });
 const packet = (root = 'root-a', rows = [row('Codex model', null, true), row('agent Alpha', 'a'), row('agent Beta', 'b')]) =>
-  ({ type: 'snapshot', snapshot: { root: { id: root }, display: { height: 6, language: 'en', colors: { agent: '#ff0088' } } }, rows, all_rows: rows });
+  ({ type: 'snapshot', snapshot: { root: { id: root }, display: { height: 6, language: 'en', colors: { agent: '#ff0088' } } }, rows: rows.length ? [mainRow(root), ...rows] : [], all_rows: rows.length ? [mainRow(root), ...rows] : [] });
 const input = (raw, name) => ({ raw, name });
 
 test('Ctrl-C leaves a child view without interrupting the hidden main task', () => {
   const controller = new hud.HudController(); controller.update(packet());
-  controller.enterHud(); controller.input(input('\r', 'enter'), true);
+  controller.enterHud(); controller.input(input(`${CSI}B`, 'down'), true);
   assert.equal(controller.input(input('\x03', 'interrupt'), false).consumed, true);
   assert.equal(controller.mode, 'cli');
   assert.equal(controller.input(input('\x03', 'interrupt'), false).consumed, false);
@@ -91,32 +92,43 @@ test('streaming key decoder preserves unknown edit sequences and bracketed paste
   assert.ok(parts.every(part => part.name === 'paste'));
 });
 
-test('empty Down selects in HUD, arrows move, Enter requests detail and one Esc returns to input', () => {
-  const requests = [], controller = new hud.HudController(request => requests.push(request));
-  controller.update(packet());
-  assert.equal(controller.input(input(`${CSI}B`, 'down'), false).consumed, false);
-  assert.equal(controller.mode, 'cli');
-  assert.equal(controller.input(input(`${CSI}B`, 'down'), true).consumed, true);
-  assert.equal(controller.mode, 'hud');
-  assert.deepEqual(controller.selected, ['native', 'a']);
-  assert.ok(controller.hudLines(4, 80)[1].includes(`${CSI}0;1;7magent Alpha`));
-  controller.input(input(`${CSI}B`, 'down'), false);
-  assert.deepEqual(controller.selected, ['native', 'b']);
-  controller.input(input('\r', 'enter'), false);
-  assert.equal(controller.mode, 'detail');
-  assert.deepEqual(requests[0], { type: 'detail', request_id: 1, root: 'root-a', key: ['native', 'b'] });
-  controller.update({ type: 'detail', request_id: 1, root: 'root-a', key: ['native', 'b'], lines: ['real output'] });
-  assert.ok(controller.overlayLines(10, 80).includes('real output'));
-  controller.input(input('\x1b', 'escape'), false);
-  assert.equal(controller.mode, 'cli');
-  assert.equal(controller.selected, null);
+test('Main arrows open children immediately, clamp, reject pending replies and never request Main', () => {
+  const requests = [], c = new hud.HudController(r => requests.push(r));
+  c.update(packet());
+  const press = name => c.input(input('', name), true);
+  assert.equal(c.input(input('', 'down'), false).consumed, false);
+  press('down');
+  assert.deepEqual(c.selected, ['main', 'root-a']);
+  assert.equal(c.availableAction(), null);
+  c.requestDetail(); assert.equal(requests.length, 0);
+  press('up'); assert.equal(c.mode, 'hud');
+  press('down'); assert.equal(c.mode, 'detail');
+  const old = requests.at(-1);
+  assert.deepEqual(old.key, ['native', 'a']);
+  press('up'); assert.equal(c.mode, 'hud'); assert.equal(c.pendingDetail, null);
+  c.update({ ...old, lines: ['stale'] }); assert.deepEqual(c.detailLines, []);
+  c.update(packet()); assert.equal(requests.length, 1);
+  press('down');
+  c.update({ ...old, lines: ['stale revisit'] }); assert.deepEqual(c.detailLines, ['Loading…']);
+  press('down'); const count = requests.length;
+  press('down'); assert.equal(requests.length, count);
+  assert.deepEqual(c.selected, ['native', 'b']);
+  press('tab'); assert.equal(c.mode, 'hud');
+  assert.deepEqual(c.selected, ['main', 'root-a']);
+  assert.equal(press('enter').consumed, true); assert.equal(c.mode, 'cli');
+  press('altDown'); press('down'); press('interrupt');
+  assert.equal(c.mode, 'cli'); assert.equal(c.pendingDetail, null);
+  press('altDown'); press('down'); const pending = requests.at(-1);
+  c.update(packet('root-b')); c.update({ ...pending, lines: ['wrong root'] });
+  assert.equal(c.mode, 'cli'); assert.deepEqual(c.detailLines, []);
+  assert.ok(requests.every(r => r.key[0] !== 'main'));
 });
 
 test('skill selection and task requests stay scoped, cancellable and draft-only', () => {
   const requests = [], c = new hud.HudController(r => requests.push(r));
   const p = packet();
   p.snapshot.agents = [{ id: 'a', status: 'running', turn_id: 't', started: 10 }];
-  c.update(p); c.enterHud(); c.input(input('\r', 'enter'), true);
+  c.update(p); c.enterHud(); c.input(input(`${CSI}B`, 'down'), true);
   c.input(input('s', 'other'), true);
   assert.equal(c.mode, 'action');
   assert.equal(requests.filter(r => r.type === 'action').length, 0);
@@ -126,7 +138,7 @@ test('skill selection and task requests stay scoped, cancellable and draft-only'
   c.input(input('\x1b', 'escape'), true);
   assert.equal(c.mode, 'cli');
   c.update({ ...first, draft: 'stale request' }); assert.equal(c.takeDraft(true), null);
-  c.enterHud(); c.input(input('\r', 'enter'), true);
+  c.enterHud(); c.input(input(`${CSI}B`, 'down'), true);
   c.input(input('s', 'other'), true); c.input(input('\r', 'enter'), true);
   c.update({ ...requests.at(-1), draft: 'stop child a' });
   assert.equal(c.takeDraft(false), null); assert.equal(c.mode, 'action');
@@ -134,14 +146,14 @@ test('skill selection and task requests stay scoped, cancellable and draft-only'
   c.input(input('\r', 'enter'), true); c.update({ ...requests.at(-1), draft: 'stop child a' });
   assert.equal(c.takeDraft(true), 'stop child a'); assert.equal(c.mode, 'cli');
   assert.equal(c.takeDraft(true), null);
-  c.enterHud(); c.input(input('\r', 'enter'), true); c.input(input('s', 'other'), true); c.input(input('\r', 'enter'), true);
+  c.enterHud(); c.input(input(`${CSI}B`, 'down'), true); c.input(input('s', 'other'), true); c.input(input('\r', 'enter'), true);
   const obsolete = requests.at(-1);
   c.update(packet('other-root')); c.update({ ...obsolete, draft: 'wrong conversation' });
   assert.equal(c.takeDraft(true), null); assert.equal(c.pendingAction, null);
   const skill = { spans: [['Skills demo', 'agent']], key: ['skills', 'turn-1'] };
   const skills = packet('root-a', [skill]);
   skills.snapshot.root.skills = ['demo']; skills.snapshot.root.skill_turn_id = 'turn-1';
-  c.update(skills); c.enterHud(); c.input(input('\r', 'enter'), true);
+  c.update(skills); c.enterHud(); c.input(input(`${CSI}B`, 'down'), true);
   assert.equal(c.selectedItem().kind, 'skills'); assert.equal(c.availableAction(), null);
   c.update({ ...requests.at(-1), lines: ['Path: /skills/demo/SKILL.md'] });
   assert.match(c.overlayLines(10, 80).join('\n'), /SKILL.md/);
@@ -220,10 +232,10 @@ test('config cancellation, reopen and root change reject late replies', () => {
   }
 });
 
-test('Up from first agent returns to input; typing resumes native editing', () => {
+test('Up clamps at Main; typing resumes native editing', () => {
   const controller = new hud.HudController(); controller.update(packet());
   controller.enterHud(); controller.input(input(`${CSI}A`, 'up'), false);
-  assert.equal(controller.mode, 'cli'); assert.equal(controller.selected, null);
+  assert.equal(controller.mode, 'hud'); assert.deepEqual(controller.selected, ['main', 'root-a']);
   controller.enterHud();
   assert.equal(controller.input(input('x', 'other'), false).consumed, false);
   assert.equal(controller.mode, 'cli');
@@ -232,7 +244,7 @@ test('Up from first agent returns to input; typing resumes native editing', () =
 test('completed row disappears without closing an open final-output detail', () => {
   const controller = new hud.HudController();
   controller.update(packet()); controller.enterHud();
-  controller.input(input('\r', 'enter'), true);
+  controller.input(input(`${CSI}B`, 'down'), true);
   const finished = packet('root-a', []);
   finished.snapshot.agents = [{ id: 'a', status: 'completed' }];
   controller.update(finished);
@@ -256,14 +268,18 @@ test('detail cycles skills and tasks with stable HUD height and scoped replies',
   p.snapshot.root.skills = ['demo']; p.snapshot.root.skill_turn_id = 'turn';
   c.update(p); c.enterHud();
   const height = c.height(24), decoder = new hud.InputDecoder();
-  c.input(input('\r', 'enter'), true);
+  c.input(input(`${CSI}B`, 'down'), true);
   const old = requests.at(-1);
+  c.input(decoder.push(`${CSI}Z`)[0], false);
+  assert.deepEqual(c.selected, ['main', 'root']);
   c.input(decoder.push(`${CSI}Z`)[0], false);
   assert.deepEqual(c.selected, ['native', '11']);
   assert.equal(c.mode, 'detail'); assert.equal(c.height(24), height);
   assert.ok(c.hudLines(height, 80).some(line => line.includes(`${CSI}0;1;7magent 11`)));
   c.update({ ...old, lines: ['stale skill'] });
   assert.deepEqual(c.detailLines, ['Loading…']);
+  c.input(decoder.push('\t')[0], false);
+  assert.deepEqual(c.selected, ['main', 'root']);
   c.input(decoder.push('\t')[0], false);
   assert.deepEqual(c.selected, skill.key);
   c.input(input('\x1b', 'escape'), false);
@@ -273,7 +289,7 @@ test('detail cycles skills and tasks with stable HUD height and scoped replies',
 
 test('detail refresh rejects stale requests and root changes clear selection', () => {
   const requests = [], controller = new hud.HudController(request => requests.push(request));
-  controller.update(packet()); controller.enterHud(); controller.input(input('\r', 'enter'), true);
+  controller.update(packet()); controller.enterHud(); controller.input(input(`${CSI}B`, 'down'), true);
   controller.update(packet());
   assert.equal(requests.length, 2, 'each collector update refreshes read-only detail');
   controller.update({ type: 'detail', request_id: 1, root: 'root-a', key: ['native', 'a'], lines: ['stale'] });
@@ -303,15 +319,25 @@ test('detail wraps complete long answers by terminal cells and scrolls through e
     assert.equal(plain.map((_, i) => terminal.buffer.active.getLine(i).translateToString(true)).join(''), chinese);
   } finally { terminal.dispose(); }
   const controller = new hud.HudController(); controller.update(packet()); controller.enterHud();
-  controller.input(input('\r', 'enter'), true);
+  controller.input(input(`${CSI}B`, 'down'), true);
   controller.update({ type: 'detail', request_id: 1, root: 'root-a', key: ['native', 'a'], lines: source });
   const seen = new Set();
   for (let i = 0; i < wrapped.length; i++) {
     const view = controller.overlayLines(5, 12).slice(1, 4);
     view.forEach(line => seen.add(line));
-    controller.input(input(`${CSI}B`, 'down'), false);
+    controller.input(input('j', 'other'), false);
   }
-  assert.ok(wrapped.every(line => seen.has(line)), 'all wrapped answer lines can be reached by Down');
+  assert.ok(wrapped.every(line => seen.has(line)), 'all wrapped answer lines can be reached by j');
+  assert.equal(controller.detailOffset, wrapped.length - 3);
+  controller.input(input('k', 'other'), false);
+  assert.equal(controller.detailOffset, wrapped.length - 4);
+  controller.input(input(`${CSI}H`, 'other'), false);
+  assert.equal(controller.detailOffset, 0);
+  controller.input(input(`${CSI}6~`, 'other'), false);
+  assert.equal(controller.detailOffset, 3);
+  controller.input(input(`${CSI}5~`, 'other'), false);
+  assert.equal(controller.detailOffset, 0);
+  controller.input(input(`${CSI}F`, 'other'), false);
   assert.equal(controller.detailOffset, wrapped.length - 3);
   controller.overlayLines(5, 24);
   assert.equal(controller.wrappedDetails(24).join(''), source.join(''), 'resize recomputes wrapping without losing text');
@@ -319,7 +345,7 @@ test('detail wraps complete long answers by terminal cells and scrolls through e
 
 test('matching detail errors appear in the read-only overlay', () => {
   const controller = new hud.HudController(); controller.update(packet()); controller.enterHud();
-  controller.input(input('\r', 'enter'), true);
+  controller.input(input(`${CSI}B`, 'down'), true);
   controller.update({ type: 'detail', request_id: 1, root: 'root-a', key: ['native', 'a'], error: 'Agent output is unavailable' });
   assert.ok(controller.overlayLines(10, 80).includes('Agent output is unavailable'));
 });
@@ -328,9 +354,9 @@ test('empty data hides HUD, display height limits reserve and hidden agents rema
   const controller = new hud.HudController();
   controller.update(packet('root', [])); assert.equal(controller.height(24), 0);
   const update = packet(); update.all_rows = update.rows.concat(Array.from({ length: 20 }, (_, i) => row(`agent ${i}`, String(i))));
-  controller.update(update); assert.equal(controller.height(24), 3);
+  controller.update(update); assert.equal(controller.height(24), 4);
   controller.enterHud(); assert.equal(controller.height(8), 4);
-  for (let i = 0; i < 22; i++) controller.input(input(`${CSI}B`, 'down'), false);
+  for (let i = 0; i < 23; i++) controller.input(input(`${CSI}B`, 'down'), false);
   assert.deepEqual(controller.selected, ['native', '19']);
   assert.ok(controller.hudLines(4, 80).some(line => line.includes(`${CSI}0;1;7magent 19`)));
 });
@@ -480,7 +506,7 @@ process.stdin.on('data',data=>{ log({input:data}); const text=data.replace(/\\x1
 const fs=require('node:fs'); const readline=require('node:readline'); let tick=0;
 const log=value=>fs.appendFileSync(${JSON.stringify(bridgeLog)},JSON.stringify(value)+'\\n'); log({pid:process.pid});
 const emit=value=>process.stdout.write(JSON.stringify(value)+'\\n');
-function update(){ const hidden=fs.existsSync(${JSON.stringify(path.join(base, 'hide'))}); const switched=fs.existsSync(${JSON.stringify(path.join(base, 'switch'))}); const skills=fs.existsSync(${JSON.stringify(path.join(base, 'skills'))}); const rows=hidden?[]:skills?[{spans:[['Skills demo','agent']],key:['skills','skill-turn']},...${JSON.stringify(packet().rows)}]:${JSON.stringify(packet().rows)}; emit({type:'snapshot',snapshot:{root:{id:switched?'root-b':'root-a',skills:skills?['demo']:[],skill_turn_id:'skill-turn'},agents:[{id:'a',status:'running',turn_id:'test-turn',started:1}],display:{height:6,language:'en'}},rows,all_rows:rows}); }
+function update(){ const hidden=fs.existsSync(${JSON.stringify(path.join(base, 'hide'))}); const switched=fs.existsSync(${JSON.stringify(path.join(base, 'switch'))}); const skills=fs.existsSync(${JSON.stringify(path.join(base, 'skills'))}); const rows=hidden?[]:skills?[${JSON.stringify(mainRow('root-a'))},{spans:[['Skills demo','agent']],key:['skills','skill-turn']},...${JSON.stringify(packet().rows.slice(1))}]:${JSON.stringify(packet().rows)}; if(rows.length)rows[0].key=['main',switched?'root-b':'root-a']; emit({type:'snapshot',snapshot:{root:{id:switched?'root-b':'root-a',skills:skills?['demo']:[],skill_turn_id:'skill-turn'},agents:[{id:'a',status:'running',turn_id:'test-turn',started:1}],display:{height:6,language:'en'}},rows,all_rows:rows}); }
 readline.createInterface({input:process.stdin}).on('line',line=>{ const req=JSON.parse(line); log(req); if(req.type==='detail')emit({...req,lines:[req.key[0]==='skills'?'Skill source /fixture/SKILL.md':'Live agent output '+(++tick)]}); if(req.type==='action')emit({...req,draft:'HUD request for '+req.key[1]}); });
 setTimeout(update,150); setInterval(update,150);
 `);
@@ -515,9 +541,17 @@ setTimeout(update,150); setInterval(update,150);
     assert.equal(envRecord.env.active, '1'); assert.equal(envRecord.env.log, 'warn,codex_core::session=info');
     // ConPTY can show the old composer while the HUD's initial resize is
     // still reaching the CLI. Press only after that redraw has settled.
-    await until(() => visible().includes('› Ask Codex') && Date.now() - lastOutput >= 100, 'resized empty composer settled');
+    await until(() => visible().includes('Fixture 80x20') && visible().includes('› Ask Codex') && Date.now() - lastOutput >= 100, 'resized empty composer settled');
     outer.write(`${CSI}B`);
-    await until(selected, 'Down selected agent in the bottom HUD');
+    await until(() => selected('Main agent'), 'Down selected Main');
+    assert.equal(requests().filter(req => req.type === 'detail').length, 0);
+    outer.write(`${CSI}B`);
+    await until(() => selected() && visible().includes('Live agent output'), 'Down opened child');
+    outer.write(`${CSI}A`);
+    await until(() => selected('Main agent') && visible().includes('› Ask Codex'), 'Up restored live Main');
+    outer.write(`${CSI}B`);
+    await until(() => selected() && visible().includes('Live agent output'), 'Down reopened child');
+    assert.ok(requests().every(req => req.type !== 'detail' || req.key[0] !== 'main'));
     assert.ok(!inputs().includes(`${CSI}B`), 'empty Down was not delivered to official CLI');
     outer.write('\r');
     await until(() => visible().includes('Live agent output'), 'Enter opened real bridge detail');
@@ -528,8 +562,8 @@ setTimeout(update,150); setInterval(update,150);
     assert.ok(selected(), 'action confirmation keeps bottom HUD selected');
     outer.write('\x1b'); await until(() => visible().includes('› Ask Codex') && !selected(), 'cancel returns directly to main');
     assert.equal(requests().filter(req => req.type === 'action').length, 0);
-    await until(() => visible().includes('Fixture 80x21') && Date.now() - lastOutput >= 100, 'cancelled view resize settled');
-    outer.write(`${CSI}B`); await until(selected, 'task selected after cancellation');
+    await until(() => visible().includes('Fixture 80x20') && Date.now() - lastOutput >= 100, 'cancelled view resize settled');
+    outer.write(`${CSI}B${CSI}B`); await until(selected, 'task selected after cancellation');
     outer.write('\r'); await until(() => visible().includes('Live agent output'), 'task view reopened after cancellation');
     outer.write('s'); await until(() => visible().includes('prepare draft'), 'confirm view reopened');
     const inputBefore = inputs().length;
@@ -537,16 +571,16 @@ setTimeout(update,150); setInterval(update,150);
     assert.equal(inputs().slice(inputBefore), `${CSI}200~HUD request for a${CSI}201~`, 'draft paste has no submit key');
     outer.write('\x7f'.repeat('HUD request for a'.length)); await until(() => visible().includes('› Ask Codex'), 'request draft erased');
     fs.writeFileSync(path.join(base, 'skills'), '1'); await until(() => visible().includes('Skills demo'), 'skill row shown');
-    await until(() => visible().includes('› Ask Codex') && Date.now() - lastOutput >= 100, 'skill layout resize settled');
-    outer.write(`${CSI}B`); await until(() => selected('Skills demo'), 'skill row selected');
+    await until(() => visible().includes('Fixture 80x19') && visible().includes('› Ask Codex') && Date.now() - lastOutput >= 100, 'skill layout resize settled');
+    outer.write(`${CSI}B${CSI}B`); await until(() => selected('Skills demo'), 'skill row selected');
     outer.write('\r'); await until(() => visible().includes('Skill source /fixture/SKILL.md'), 'skill details work through real PTY');
     assert.ok(selected('Skills demo'));
     outer.write('\t'); await until(() => visible().includes('Live agent output') && selected(), 'Tab switches skill to task inline');
     outer.write(`${CSI}Z`); await until(() => visible().includes('Skill source /fixture/SKILL.md') && selected('Skills demo'), 'Shift-Tab returns to skill inline');
     outer.write('\x1b'); await until(() => visible().includes('› Ask Codex') && !selected('Skills demo'), 'single Esc restored CLI');
     fs.unlinkSync(path.join(base, 'skills')); await until(() => visible().includes('agent Alpha') && !visible().includes('Skills demo'), 'agent rows restored');
-    await until(() => visible().includes('Fixture 80x21') && visible().includes('› Ask Codex') && Date.now() - lastOutput >= 100, 'restored agent layout resize settled');
-    outer.write(`${CSI}B`); await until(selected, 'agent row selected after layout change');
+    await until(() => visible().includes('Fixture 80x20') && visible().includes('› Ask Codex') && Date.now() - lastOutput >= 100, 'restored agent layout resize settled');
+    outer.write(`${CSI}B${CSI}B`); await until(selected, 'agent row selected after layout change');
     outer.write('\r'); await until(() => visible().includes('Live agent output'), 'agent details reopened');
     outer.write('\x1b'); await until(() => visible().includes('› Ask Codex') && !selected(), 'single Esc restored CLI input');
     outer.write(`z${CSI}B`);
@@ -554,14 +588,18 @@ setTimeout(update,150); setInterval(update,150);
     assert.equal(selected(), false, 'pending native edit cannot select HUD using stale empty screen');
     outer.write('\x7f'); await until(() => visible().includes('› Ask Codex'), 'rapid draft erased');
     outer.write('x'); await until(() => visible().includes('› x'), 'native draft preserved');
-    outer.write(`${CSI}1;3B`); await until(selected, 'explicit selection preserves existing draft');
+    outer.write(`${CSI}1;3B${CSI}B`); await until(selected, 'explicit selection preserves existing draft');
     outer.write('\r'); await until(() => visible().includes('Live agent output') && selected(), 'draft hidden by inline child view');
     const beforeDetailEscape = inputs();
+    outer.write(`${CSI}A`);
+    await until(() => selected('Main agent') && visible().includes('› x'), 'Up restores preserved draft on Main');
+    outer.write(`${CSI}B`);
+    await until(() => selected() && visible().includes('Live agent output'), 'Down reopens child without editing draft');
     outer.write('\x1b'); await until(() => visible().includes('› x') && !selected(), 'single Esc restores original native draft');
     assert.equal(inputs(), beforeDetailEscape, 'view navigation never reaches CLI input');
     outer.write(`${CSI}B`); await until(() => inputs().includes(`${CSI}B`), 'draft Down passed to official CLI');
     outer.write('\x7f'); await until(() => visible().includes('› Ask Codex'), 'backspace editing restored empty composer');
-    outer.write(`${CSI}B`); await until(selected, 'agent selected again');
+    outer.write(`${CSI}B${CSI}B`); await until(selected, 'agent selected again');
     fs.writeFileSync(path.join(base, 'switch'), '1'); await until(() => !selected(), 'root switch cleared HUD selection');
     outer.resize(90, 28); terminal.resize(90, 28);
     await until(() => requests().some(req => req.type === 'size' && req.cols === 90 && req.rows === 28), 'resize sent to bridge');
@@ -667,9 +705,9 @@ process.stdin.on('data',data=>{const text=data.replace(/\\x1b(?:\\[[0-?]*[ -/]*[
       return buffer.cursorX === 2 && buffer.cursorY === 9 && line?.translateToString(true).trimEnd() === '› Ask Codex to do anything' &&
         Array.from({length: 23}, (_, i) => line.getCell(i+2)?.isDim()).every(Boolean);
     };
-    await until(() => visible().includes('fixture-ready 90x25') && pendingOuterWrites === 0 &&
+    await until(() => visible().includes('fixture-ready 90x24') && pendingOuterWrites === 0 &&
       !terminal.modes.synchronizedOutputMode && outerComposerReady(), 'real bridge resized composer acknowledged');
-    outer.write(`${CSI}B`); await until(selected, 'plain Down selected actual correlated agent');
+    outer.write(`${CSI}B${CSI}B`); await until(selected, 'plain Down selected actual correlated agent');
     outer.write('\r'); await until(() => visible().includes(answer), 'real Python details returned actual child answer');
     assert.deepEqual(fs.readFileSync(childLog), beforeLog, 'viewing details never changes or resumes the child session');
     assert.ok(selected(), 'bottom HUD remains selected in detail');

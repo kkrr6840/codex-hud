@@ -18,6 +18,9 @@ from .sources import database, read_json, Rollout, timestamp
 def entries(snapshot):
     result = []
     root = snapshot.get("root") or {}
+    if root.get("id"):
+        result.append({**root, "kind": "main", "key": ("main", root["id"]),
+                       "name": "Main agent", "thread": root["id"]})
     if root.get("skills"):
         identity = root.get("skill_turn_id") or root.get("id")
         result.append({"kind": "skills", "id": identity, "key": ("skills", identity),
@@ -88,6 +91,8 @@ def transcript(home, entry):
 
 
 def details(home, item, now, en=False):
+    if item.get("kind") == "main":
+        return ["Main agent · live conversation" if en else "Main agent · 主会话"]
     if item.get("kind") == "skills":
         output = ["Skills · read this turn" if en else "Skills · 本轮已读",
                   "These are recorded reads, not continuously running skills." if en else "这里显示本轮成功读取的技能说明。", ""]
@@ -196,7 +201,7 @@ def run(runtime, focus=None, root=None, detail=False, embedded=False):
                 pending, notice = None, ""
             items = entries(snapshot)
             if not expanded and not history:
-                items = [item for item in items if item.get("kind") == "skills" or item.get("status") not in ("completed", "failed") and not (item.get("status") == "unknown" and item.get("ended") is not None)]
+                items = [item for item in items if item.get("kind") in ("main", "skills") or item.get("status") not in ("completed", "failed") and not (item.get("status") == "unknown" and item.get("ended") is not None)]
             if selected_key:
                 match = next((i for i, item in enumerate(items) if item["key"] == selected_key), None)
                 if match is None:
@@ -207,6 +212,8 @@ def run(runtime, focus=None, root=None, detail=False, embedded=False):
                 else:
                     selection = match
             selection = min(selection, max(0, len(items)-1))
+            if expanded and items and items[selection]["kind"] == "main":
+                return "navigation"
             if embedded and expanded and items and items[selection]["key"] != last_selected:
                 select_entry(runtime, items[selection]["key"], identity, token)
                 last_selected = items[selection]["key"]
@@ -224,7 +231,7 @@ def run(runtime, focus=None, root=None, detail=False, embedded=False):
                     except curses.error:
                         pass
             line(0, "Codex HUD · Task / Skill view · read-only" if en else "Codex HUD · 子任务 / Skill 视图 · 只读", curses.A_BOLD)
-            line(1, ("↑↓ scroll · Tab switch · Esc main" if en else "↑↓ 滚动 · Tab 切换 · Esc 返回主会话") if expanded else ("↑↓ select · Enter inspect · Esc/q main" if en else "↑↓ 选择 · Enter 查看 · Esc/q 返回主会话"))
+            line(1, ("↑↓/Tab switch · PgUp/PgDn scroll · Esc main" if en else "↑↓/Tab 切换 · PgUp/PgDn 滚动 · Esc 返回主会话") if expanded else ("↑↓ select · Enter inspect · Esc/q main" if en else "↑↓ 选择 · Enter 查看 · Esc/q 返回主会话"))
             room = max(1, height-4)
             if pending:
                 line(1, "Enter prepare draft · Esc cancel" if en else "Enter 生成请求草稿 · Esc 取消")
@@ -251,6 +258,8 @@ def run(runtime, focus=None, root=None, detail=False, embedded=False):
                     kind = "Skills" if item["kind"] == "skills" else item["kind"] if en else "原生" if item["kind"] == "native" else "分流"
                     state = item.get("status", "unknown")
                     value = ("Skills · " + " · ".join(map(clean, item["names"]))) if item["kind"] == "skills" else f"{ICONS.get(state, '?')} {kind} · {clean(title)} · {state if en else LABEL.get(state, state)} · {elapsed(item, snapshot.get('time', time.time()))}"
+                    if item["kind"] == "main":
+                        value = "Main agent · " + ("live conversation" if en else "主会话")
                     attr = curses.A_REVERSE | curses.A_BOLD if index == selection else curses.color_pair(COLORS[STATE_COLOR.get(state, "muted")])
                     line(index-offset+3, value, attr)
             else:
@@ -281,16 +290,20 @@ def run(runtime, focus=None, root=None, detail=False, embedded=False):
             if key in (ord("l"), ord("L")) and expanded:
                 expanded, scroll = False, 0
                 pending = None
-            elif key in (9, curses.KEY_BTAB) and expanded and items:
+            elif key in (9, curses.KEY_BTAB, curses.KEY_UP, curses.KEY_DOWN) and expanded and items:
                 from .display import render_rows
-                visible = {row.key for row in render_rows(snapshot, config={**config, "agents_limit": 0}) if row.key}
-                candidates = [item for item in items if history or item["key"] in visible]
+                visible = [row.key for row in render_rows(snapshot, config={**config, "agents_limit": 0}) if row.key]
+                candidates = items if history else [item for key in visible for item in items if item["key"] == key]
                 if candidates:
                     current_index = next((i for i, item in enumerate(candidates) if item["key"] == selected_key), -1)
-                    selected_key = candidates[(current_index + (1 if key == 9 else -1)) % len(candidates)]["key"]
+                    index = current_index + (1 if key in (9, curses.KEY_DOWN) else -1)
+                    index = index % len(candidates) if key in (9, curses.KEY_BTAB) else max(0, min(len(candidates)-1, index))
+                    selected_key = candidates[index]["key"]
                     selection = next(i for i, item in enumerate(items) if item["key"] == selected_key)
                     scroll, notice = 0, ""
             elif key in (10, 13, curses.KEY_ENTER) and items:
+                if items[selection]["kind"] == "main":
+                    return "main"
                 expanded, scroll = True, 0
             elif key in (curses.KEY_DOWN, ord("j"), curses.KEY_UP, ord("k")):
                 delta = 1 if key in (curses.KEY_DOWN, ord("j")) else -1
@@ -308,7 +321,7 @@ def run(runtime, focus=None, root=None, detail=False, embedded=False):
         destination = "main"
     finally:
         if embedded:
-            close_view(runtime, token)
+            close_view(runtime, token, keep_navigation=locals().get("destination") == "navigation")
         elif runtime.exists() and spec.get("socket") and spec.get("top"):
             nav = read_json(runtime / "navigation.json", {})
             target = spec["hud"] if locals().get("destination") == "hud" and nav.get("root") == root and tuple(nav.get("key") or []) == tuple(focus or []) else spec["top"]

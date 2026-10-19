@@ -79,7 +79,7 @@ class NativeBridgeTest(unittest.TestCase):
         state = Bridge(self.runtime)
         packet = state.collect()
         self.assertEqual(packet["snapshot"]["root"]["id"], self.root)
-        self.assertEqual([r["key"] for r in packet["all_rows"] if r["key"]], [("native", self.child)])
+        self.assertEqual([r["key"] for r in packet["all_rows"] if r["key"]], [("main", self.root), ("native", self.child)])
         request = {"type": "detail", "request_id": 8, "root": self.root, "key": ["native", self.child]}
         before = {p: p.read_bytes() for p in (self.home/"sessions").glob("*.jsonl")}
         response = state.request(request)

@@ -112,7 +112,7 @@ After an upgrade, the hud skill can refresh the macOS observer while keeping the
 
 ## Task management and Skill details (v0.8)
 
-Press **Down** from the default empty composer to highlight the first selectable Skills or agent row. **Up/Down** selects and **Enter** opens the recorded content. Starting with v0.8.1, it replaces the upper conversation area while the bottom HUD stays visible. **One Esc** returns to the main conversation and its draft; **Tab / Shift-Tab** switches between eligible entries. The original CLI keeps running in the background. Up from the first selected row also returns to input. With a draft, a native menu, or no selectable rows, ordinary Down passes through to Codex.
+Starting with v0.8.2, **Main agent** is the first selectable HUD entry by default. Press **Down** from the default empty composer to enter navigation, then **Up/Down** to switch the upper viewport directly between the live main conversation, Skills, and child tasks. The bottom HUD stays visible. Selecting Main restores the original live CLI while keeping navigation focused for another switch; **Enter** or **Esc** returns to the composer. **One Esc** from a child view also returns directly to the composer, while **Tab / Shift-Tab** cycles entries. The original CLI and its draft are preserved. With a draft, a native menu, or no selectable rows, ordinary Down passes through to Codex. Hide the Main entry with `config --hide main_agent`; a fresh HUD with no data remains hidden.
 
 Task and Skill views are read-only and use the existing upper viewport rather than a popup or another CLI. On macOS the original CLI pane and PTY remain alive, and a failed viewer restores that pane. Stop/retry request preparation remains available in task details.
 
@@ -124,14 +124,15 @@ Use **Ctrl-b followed by Down** to inspect completed and failed history without 
 
 | Action | macOS | Windows |
 | --- | --- | --- |
-| Select from empty input | Down | Down |
-| Move / inspect / return | Up/Down / Enter / Esc | Up/Down / Enter / Esc |
+| Select Main from empty input | Down | Down |
+| Switch view / return to input | Up/Down / Esc | Up/Down / Esc |
+| Scroll child output | PageUp / PageDown, or j / k | PageUp / PageDown, or j / k |
 | Auxiliary entry | Option (⌥)+Down, or Ctrl-b then Down | Alt+Down, or Ctrl-b then Down |
 | Settings | F10 (or fn+F10), or Ctrl-b then uppercase C | Ctrl-b then uppercase C, or F8 |
 
 If your Mac terminal reserves Option, use plain Down or Ctrl-b then Down. Auxiliary shortcuts open a list on macOS and select a HUD row on Windows. Use them when the composer has a different placeholder.
 
-Details show live task, model, status, elapsed time, reported usage, recent tools, and readable assistant output for native agents and correlated relay jobs. Up/Down scrolls long output. The main CLI keeps running throughout.
+Details show live task, model, status, elapsed time, reported usage, recent tools, and readable assistant output for native agents and correlated relay jobs. PageUp/PageDown or j/k scrolls long output. The main CLI keeps running throughout.
 
 Starting with v0.6.1, completed agents and relay jobs leave the bottom list automatically, including their counts and overflow rows. An open detail view remains available for reading the final result. To show completed history again, ask the hud skill to set `agents_show_completed=true`; no session restart is needed.
 

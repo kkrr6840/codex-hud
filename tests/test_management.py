@@ -17,7 +17,7 @@ class ManagementTest(unittest.TestCase):
 
     def test_requests_are_scoped_single_line_drafts_and_never_mutate_telemetry(self):
         before = copy.deepcopy(self.snapshot)
-        for item, action in zip(entries(self.snapshot), ("stop", "retry")):
+        for item, action in zip(entries(self.snapshot)[1:], ("stop", "retry")):
             text = request_text(self.snapshot, "parent", item["key"], action, stamp(item))
             self.assertIn(item["id"], text)
             self.assertIn("主会话", text)
@@ -25,11 +25,11 @@ class ManagementTest(unittest.TestCase):
             self.assertNotIn("\r", text)
         self.assertEqual(self.snapshot, before)
         self.snapshot["display"] = {"language": "en"}
-        item = entries(self.snapshot)[0]
+        item = entries(self.snapshot)[1]
         self.assertIn("Codex HUD task request", request_text(self.snapshot, "parent", item["key"], "stop", stamp(item)))
 
     def test_foreign_stale_main_and_unsupported_targets_are_rejected(self):
-        item = entries(self.snapshot)[0]
+        item = entries(self.snapshot)[1]
         for root, key, action, expected in [
             ("other", item["key"], "stop", stamp(item)),
             ("parent", ("native", "foreign"), "stop", stamp(item)),
@@ -46,6 +46,9 @@ class ManagementTest(unittest.TestCase):
         self.assertEqual(actions({"kind": "relay", "status": "unknown"}), [])
         self.assertEqual(actions({"kind": "relay", "status": "unknown", "ended": 1}), ["retry"])
         self.assertEqual(actions({"kind": "skills", "status": "running"}), [])
+        self.assertEqual(actions({"kind": "main", "status": "running"}), [])
+        with self.assertRaises(ValueError):
+            request_text(self.snapshot, "parent", ("main", "parent"), "stop", stamp(entries(self.snapshot)[0]))
         self.assertEqual(actions({"kind": "native", "status": "idle", "ended": 1}), ["retry"])
         self.assertEqual(actions({"kind": "native", "status": "idle"}), [])
 
@@ -63,7 +66,7 @@ class ManagementTest(unittest.TestCase):
     def test_skill_details_use_recorded_metadata_without_opening_paths(self):
         self.snapshot["root"].update(skills=["hud"], skill_turn_id="turn-A", skill_reads=[
             {"name": "hud", "path": "/missing/private/SKILL.md", "description": "HUD display", "source": "codex-hud", "read_at": 100}])
-        item = entries(self.snapshot)[0]
+        item = entries(self.snapshot)[1]
         self.assertEqual(item["key"], ("skills", "turn-A"))
         rendered = "\n".join(details("/nonexistent", item, 101, True))
         self.assertIn("/missing/private/SKILL.md", rendered)

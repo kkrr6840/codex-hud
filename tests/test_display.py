@@ -37,6 +37,16 @@ class DisplayTest(unittest.TestCase):
         context = next(row for row in render_rows(snapshot) if "上下文" in row.text)
         self.assertTrue(any("█" in text and kind == "bad" for text, kind in context.spans))
 
+    def test_main_is_first_choice_even_without_children_and_can_be_hidden(self):
+        snapshot = self.snapshot()
+        snapshot['root'].update(model='test-model', skills=['hud'], skill_turn_id='turn')
+        keys = [r.key for r in render_rows(snapshot) if r.key]
+        self.assertEqual(keys, [('main', 'session'), ('skills', 'turn')])
+        config = {**DEFAULT, 'show': {**DEFAULT['show'], 'main_agent': False}}
+        self.assertNotIn(('main', 'session'), [r.key for r in render_rows(snapshot, config=config)])
+        snapshot['root']['skills'] = []
+        self.assertEqual([r.key for r in render_rows(snapshot) if r.key], [('main', 'session')])
+
     def test_turn_clock_ticks_without_tool_events_and_resets_for_the_next_turn(self):
         snapshot = self.snapshot()
         snapshot["root"].update(status="running", started=1000)
@@ -88,7 +98,7 @@ class DisplayTest(unittest.TestCase):
         self.assertNotIn("completed-native", text)
         self.assertNotIn("completed-relay", text)
         self.assertNotIn("+", text)
-        self.assertEqual([r.key for r in rows if r.key], [("native", "active"), ("relay", "unknown")])
+        self.assertEqual([r.key for r in rows if r.key], [("main", "session"), ("native", "active"), ("relay", "unknown")])
         visible = render_rows(snapshot, config={**DEFAULT, "agents_show_completed": True})
         self.assertTrue(any(r.key == ("native", "0") for r in visible))
 
@@ -107,7 +117,7 @@ class DisplayTest(unittest.TestCase):
         self.assertIn("未返回用量", text)
         self.assertNotIn("失败", text)
         self.assertNotIn("+", text)
-        self.assertEqual([r.key for r in rows if r.key], [("native", "active"), ("relay", "unknown")])
+        self.assertEqual([r.key for r in rows if r.key], [("main", "session"), ("native", "active"), ("relay", "unknown")])
         # Failure data stays available for parent decisions and explicit inspection.
         self.assertEqual(snapshot["agents"][0]["status"], "failed")
         self.assertEqual(len(snapshot["agents"]), 9)
@@ -123,12 +133,12 @@ class DisplayTest(unittest.TestCase):
             {"id": "unresolved", "model": "unresolved-relay", "status": "unknown", "ended": None, "usage": None},
         ]
         rows = render_rows(snapshot)
-        self.assertEqual([row.key for row in rows if row.key], [("relay", "unresolved")])
+        self.assertEqual([row.key for row in rows if row.key], [("main", "session"), ("relay", "unresolved")])
         self.assertTrue(any("1 未知" in row.text for row in rows))
         self.assertIsNone(snapshot["offload"]["jobs"][0]["usage"])
         self.assertEqual(snapshot["offload"]["jobs"][0]["status"], "unknown")
         history = render_rows(snapshot, config={**DEFAULT, "agents_show_completed": True})
-        self.assertEqual([row.key for row in history if row.key], [("relay", "ended"), ("relay", "unresolved")])
+        self.assertEqual([row.key for row in history if row.key], [("main", "session"), ("relay", "ended"), ("relay", "unresolved")])
 
     def test_quotas_use_window_length_and_show_remaining_with_local_reset(self):
         snapshot = self.snapshot()

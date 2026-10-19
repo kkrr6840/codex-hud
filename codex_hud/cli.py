@@ -209,9 +209,9 @@ def bind_agents(spec):
     tmux(spec["socket"], "bind-key", "-n", "M-Down", *view)
     tmux(spec["socket"], "bind-key", "-n", "Down", "run-shell", command("_down", spec["runtime"], "#{pane_id}", runtime=spec["runtime"]))
     active = "#{&&:#{==:#{@hud-nav},1},#{||:#{==:#{pane_id}," + spec["hud"] + "},#{&&:#{==:#{pane_id}," + spec["top"] + "},#{==:#{pane_active},0}}}}"
-    for key in ("Up", "Enter", "Escape"):
+    for key in ("Up", "Enter", "Escape", "C-c"):
         tmux(spec["socket"], "bind-key", "-n", key, "if-shell", "-F", active,
-             shlex.join(["send-keys", "-t", spec["hud"], key]), shlex.join(["send-keys", key]))
+             shlex.join(["send-keys", "-t", spec["hud"], "Escape" if key == "C-c" else key]), shlex.join(["send-keys", key]))
 
 
 def launch(argv):
@@ -518,9 +518,9 @@ def panel(runtime):
                 elif key in names:
                     tmux(spec["socket"], "send-keys", "-t", spec["top"], names[key])
                 key, raw_key = -1, None
-            if selected and key in (curses.KEY_DOWN, curses.KEY_UP, 10, 13, curses.KEY_ENTER, 27):
+            if selected and key in (curses.KEY_DOWN, curses.KEY_UP, 9, curses.KEY_BTAB, 10, 13, curses.KEY_ENTER, 27):
                 from .keys import clear
-                if key == 27 or (key == curses.KEY_UP and choices.index(selected) == 0):
+                if key == 27:
                     close_view(runtime)
                     clear(runtime, spec)
                     selected = None
@@ -528,9 +528,12 @@ def panel(runtime):
                 elif key in (10, 13, curses.KEY_ENTER):
                     open_view(runtime, selected, nav["root"], True)
                 else:
-                    index = max(0, min(len(choices)-1, choices.index(selected)+(1 if key == curses.KEY_DOWN else -1)))
+                    index = choices.index(selected)+(1 if key in (curses.KEY_DOWN, 9) else -1)
+                    index = index % len(choices) if key in (9, curses.KEY_BTAB) else max(0, min(len(choices)-1, index))
                     selected = choices[index]
                     atomic_json(runtime / "navigation.json", {"root": nav["root"], "key": selected})
+                    if selected[0] != "main":
+                        open_view(runtime, selected, nav["root"], True)
             elif selected and (isinstance(raw_key, str) or key == curses.KEY_BACKSPACE):
                 from .keys import clear
                 close_view(runtime)

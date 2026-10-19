@@ -51,6 +51,16 @@ class AgentsTest(unittest.TestCase):
             f.write(json.dumps({"type": "response_item", "payload": {"type": "agent_message", "content": [{"text": "Second result"}]}})+"\n")
         self.assertEqual(transcript(self.home, {"thread": "child"})[1][-1], "Second result")
 
+    def test_main_entry_is_always_first_and_never_loads_a_transcript(self):
+        from unittest.mock import patch
+        snapshot = {"root": {"id": "parent", "status": "running", "skills": ["hud"]},
+                    "agents": [{"id": "child"}]}
+        main, skill, child = entries(snapshot)
+        self.assertEqual(main["key"], ("main", "parent"))
+        self.assertEqual(main["name"], "Main agent")
+        with patch("codex_hud.agents.transcript", side_effect=AssertionError("Main is live")):
+            self.assertIn("Main agent", details(self.home, main, 0)[0])
+
     def test_mismatched_identity_and_non_session_paths_are_rejected(self):
         path = self.save("different", "Private output")
         self.db.execute("INSERT INTO threads VALUES(?,?)", ("child", str(path)))

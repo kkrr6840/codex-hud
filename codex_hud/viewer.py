@@ -27,7 +27,7 @@ def state(runtime):
     return view if re.fullmatch(r"%\d+", str(view.get("pane", ""))) else {}
 
 
-def close_view(runtime, token=None, locked=False):
+def close_view(runtime, token=None, locked=False, keep_navigation=False):
     from .cli import tmux
     from .keys import clear
     runtime = Path(runtime)
@@ -61,7 +61,13 @@ def close_view(runtime, token=None, locked=False):
         (runtime / "view.json").unlink(missing_ok=True)
         clear(runtime, spec)
         tmux(socket, "select-window", "-t", main_window, check=False)
-        tmux(socket, "select-pane", "-t", spec["top"], check=False)
+        root = (read_json(runtime / "snapshot.json", {}).get("root") or {}).get("id")
+        if keep_navigation and root == view["root"]:
+            tmux(socket, "select-pane", "-t", spec["hud"], check=False)
+            atomic_json(runtime / "navigation.json", {"root": root, "key": ["main", root]})
+            tmux(socket, "set-option", "-w", "-t", spec["top"], "@hud-nav", "1", check=False)
+        else:
+            tmux(socket, "select-pane", "-t", spec["top"], check=False)
     # The viewer exits naturally after restoring the CLI. External recovery
     # also terminates the owned viewer pane; the original CLI is never killed.
     if os.environ.get("TMUX_PANE") != view["pane"]:
@@ -84,6 +90,12 @@ def open_view(runtime, focus=None, root=None, detail=False):
     if focus and tuple(focus) not in [item["key"] for item in entries(snapshot)]:
         return 0
     socket = spec["socket"]
+    if focus and tuple(focus) == ("main", identity):
+        if close_view(runtime):
+            from .keys import clear
+            clear(runtime, spec)
+            tmux(socket, "select-pane", "-t", spec["top"], check=False)
+        return 0
     try:
         with layout_lock(runtime):
             view = state(runtime)

@@ -14,7 +14,7 @@ ELEMENTS = {
     "session_name": "会话名称", "version": "CLI 版本", "context": "上下文",
     "quota_5h": "5 小时额度", "quota_weekly": "每周额度", "quota_other": "其他额度窗口",
     "tokens": "Token 明细", "cache": "缓存命中率", "tools": "工具活动",
-    "mcp": "MCP 活动", "skills": "本轮已读 Skills", "agents": "子 agent", "todos": "计划进度",
+    "mcp": "MCP 活动", "skills": "本轮已读 Skills", "main_agent": "Main agent 入口", "agents": "子 agent", "todos": "计划进度",
     "duration": "会话时长", "session_start": "开始时间", "last_response": "最近响应",
     "compactions": "压缩次数", "environment": "配置数量", "memory": "系统内存",
     "offload": "Codex 分流", "custom": "自定义文字",
@@ -24,7 +24,7 @@ SECTIONS = ["header", "context", "quota", "tokens", "cache", "skills", "tools", 
 DEFAULT = {
     "language": "zh-Hans", "layout": "expanded", "separators": True,
     "height": 11, "max_width": 0, "path_levels": 2,
-    "show": {key: key in {"model", "effort", "status", "turn_duration", "project", "git", "context", "quota_5h", "quota_weekly", "quota_other", "tokens", "cache", "skills", "tools", "mcp", "agents", "todos", "offload"} for key in ELEMENTS},
+    "show": {key: key in {"model", "effort", "status", "turn_duration", "project", "git", "context", "quota_5h", "quota_weekly", "quota_other", "tokens", "cache", "skills", "tools", "mcp", "main_agent", "agents", "todos", "offload"} for key in ELEMENTS},
     "order": SECTIONS, "header_order": ["model", "status", "turn_duration", "project", "git", "provider", "session_name", "version"],
     "merge_groups": [["context", "quota"], ["tokens", "cache"]], "right_align": [],
     "context_value": "both", "context_bar": True, "context_window": None,
@@ -145,12 +145,12 @@ def save(changes):
 
 def preset(name):
     if name == "focus":
-        visible = {"status", "turn_duration", "git", "context", "quota_5h", "quota_weekly", "quota_other", "tokens", "cache", "skills", "tools", "mcp", "agents", "todos", "offload"}
+        visible = {"status", "turn_duration", "git", "context", "quota_5h", "quota_weekly", "quota_other", "tokens", "cache", "skills", "tools", "mcp", "main_agent", "agents", "todos", "offload"}
         return {"show": {key: key in visible for key in ELEMENTS}, "layout": "compact", "cache_style": "text",
                 "order": ["header", "skills", "context", "quota", "tokens", "cache", "tools", "mcp", "agents", "todos", "offload", "session", "environment", "memory", "custom"],
                 "merge_groups": [["context", "quota"], ["tokens", "cache"], ["header", "skills"]]}
     minimum = {"model", "project", "git", "context", "quota_5h", "quota_weekly"}
-    standard = minimum | {"effort", "status", "turn_duration", "cache", "skills", "tools", "mcp", "agents", "todos", "offload"}
+    standard = minimum | {"effort", "status", "turn_duration", "cache", "skills", "tools", "mcp", "main_agent", "agents", "todos", "offload"}
     visible = minimum if name == "minimal" else standard if name == "standard" else set(ELEMENTS)
     return {"show": {key: key in visible for key in ELEMENTS}, "layout": "compact" if name == "minimal" else "expanded"}
 

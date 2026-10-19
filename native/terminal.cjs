@@ -322,6 +322,7 @@ class HudController {
   }
   selectedItem() {
     if (!this.selected) return null;
+    if (this.selected[0] === 'main') return this.selected[1] === this.root ? { kind: 'main' } : null;
     if (this.selected[0] === 'skills') return this.snapshot.root?.skills?.length &&
       (this.snapshot.root.skill_turn_id || this.root) === this.selected[1] ? { kind: 'skills' } : null;
     const items = this.selected[0] === 'native' ? this.snapshot.agents : this.snapshot.offload?.jobs;
@@ -349,7 +350,14 @@ class HudController {
     this.selected = rows[0].key; this.mode = 'hud'; this.scroll = 0;
     return true;
   }
+  openSelected() {
+    this.pendingDetail = null; this.detailOffset = 0; this.detailLines = [];
+    this.pendingAction = null; this.pendingDraft = null; this.actionChoice = null;
+    if (this.selected?.[0] === 'main') { this.mode = 'hud'; return; }
+    this.mode = 'detail'; this.detailLines = ['Loading…']; this.requestDetail();
+  }
   requestDetail() {
+    if (!this.selected || this.selected[0] === 'main') return;
     this.pendingDetail = ++this.requestId;
     this.send({ type: 'detail', request_id: this.pendingDetail, root: this.root, key: this.selected });
   }
@@ -366,7 +374,7 @@ class HudController {
       return { consumed: (token.name === 'altDown' || (token.name === 'down' && empty)) && this.enterHud() };
     }
     // A read-only child view must not route Ctrl-C into the hidden main task.
-    if (token.name === 'interrupt') { this.pendingConfig = null; this.pendingAction = null; this.pendingDraft = null; this.mode = 'cli'; this.selected = null; return { consumed: true }; }
+    if (token.name === 'interrupt') { this.pendingDetail = null; this.pendingConfig = null; this.pendingAction = null; this.pendingDraft = null; this.mode = 'cli'; this.selected = null; return { consumed: true }; }
     if (token.name === 'escape') {
       this.pendingConfig = null;
       this.pendingAction = null; this.pendingDraft = null;
@@ -374,28 +382,28 @@ class HudController {
       this.mode = 'cli'; this.selected = null; this.pendingDetail = null;
       return { consumed: true };
     }
-    if (this.mode === 'hud') {
-      if (token.name === 'down' || token.name === 'up') {
-        const rows = this.selectable(), index = rows.findIndex(row => keyId(row.key) === keyId(this.selected));
-        if (token.name === 'up' && index === 0) { this.mode = 'cli'; this.selected = null; return { consumed: true }; }
-        this.selected = rows[Math.max(0, Math.min(rows.length - 1, index + (token.name === 'down' ? 1 : -1)))]?.key || null;
-      } else if (token.name === 'enter') {
-        this.mode = 'detail'; this.detailOffset = 0; this.detailLines = ['Loading…']; this.requestDetail();
-      } else {
-        // Typing immediately returns to the CLI without changing its draft.
-        this.mode = 'cli'; this.selected = null; return { consumed: false };
+    if (['hud', 'detail'].includes(this.mode) && ['up', 'down', 'tab', 'shiftTab'].includes(token.name)) {
+      const rows = this.selectable(), index = rows.findIndex(row => keyId(row.key) === keyId(this.selected));
+      const delta = ['down', 'tab'].includes(token.name) ? 1 : -1;
+      const cycle = ['tab', 'shiftTab'].includes(token.name);
+      const nextIndex = index < 0 ? (delta > 0 ? 0 : rows.length - 1) : cycle ?
+        (index + delta + rows.length) % rows.length : Math.max(0, Math.min(rows.length - 1, index + delta));
+      const next = rows[nextIndex];
+      if (next && keyId(next.key) !== keyId(this.selected)) { this.selected = next.key; this.openSelected(); }
+    } else if (this.mode === 'hud') {
+      if (token.name === 'enter' && this.selected?.[0] !== 'main') this.openSelected();
+      else {
+        this.mode = 'cli'; this.selected = null; this.pendingDetail = null;
+        return { consumed: token.name === 'enter' };
       }
     } else if (this.mode === 'detail') {
-      if (token.name === 'tab' || token.name === 'shiftTab') {
-        const rows = this.selectable();
-        const index = rows.findIndex(row => keyId(row.key) === keyId(this.selected));
-        const next = rows.length ? rows[index < 0 ? (token.name === 'tab' ? 0 : rows.length - 1) :
-          (index + (token.name === 'tab' ? 1 : -1) + rows.length) % rows.length] : null;
-        if (next && keyId(next.key) !== keyId(this.selected)) {
-          this.selected = next.key; this.detailOffset = 0; this.detailLines = ['Loading…']; this.requestDetail();
-        }
-      } else if (token.name === 'down') this.detailOffset = Math.min(Math.max(0, this.wrappedDetails(this.detailWidth).length - this.detailPageRows), this.detailOffset + 1);
-      else if (token.name === 'up') this.detailOffset = Math.max(0, this.detailOffset - 1);
+      const max = Math.max(0, this.wrappedDetails(this.detailWidth).length - this.detailPageRows);
+      if (token.raw === 'j') this.detailOffset = Math.min(max, this.detailOffset + 1);
+      else if (token.raw === 'k') this.detailOffset = Math.max(0, this.detailOffset - 1);
+      else if (token.raw === `${CSI}6~`) this.detailOffset = Math.min(max, this.detailOffset + this.detailPageRows);
+      else if (token.raw === `${CSI}5~`) this.detailOffset = Math.max(0, this.detailOffset - this.detailPageRows);
+      else if ([`${CSI}H`, '\x1bOH', `${CSI}1~`, `${CSI}7~`].includes(token.raw)) this.detailOffset = 0;
+      else if ([`${CSI}F`, '\x1bOF', `${CSI}4~`, `${CSI}8~`].includes(token.raw)) this.detailOffset = max;
       else if ((/^[sS]$/.test(token.raw) && this.availableAction() === 'stop') || (/^[rR]$/.test(token.raw) && this.availableAction() === 'retry')) {
         this.mode = 'action'; this.actionChoice = this.availableAction(); this.actionError = '';
         this.pendingAction = null; this.pendingDraft = null;
@@ -455,7 +463,7 @@ class HudController {
     const lines = visible.map(row => styledRow(row, width, colors, this.inspecting() && keyId(row.key) === keyId(this.selected)));
     if (footer) {
       const language = this.snapshot.display?.language;
-      const hint = ['detail', 'action'].includes(this.mode) ? (language === 'en' ? ' Tab/Shift-Tab switch · Esc back' : ' Tab/Shift-Tab 切换 · Esc 返回') : this.mode === 'hud' ? (language === 'en' ? ' ↑↓ select · Enter inspect · Esc back to input' : ' ↑↓ 选择 · Enter 查看 · Esc 返回输入') :
+      const hint = ['detail', 'action'].includes(this.mode) ? (language === 'en' ? ' ↑↓/Tab switch · Esc back' : ' ↑↓/Tab 切换 · Esc 返回') : this.mode === 'hud' ? (this.selected?.[0] === 'main' ? (language === 'en' ? ' ↑↓/Tab switch · Enter/Esc back to input' : ' ↑↓/Tab 切换 · Enter/Esc 返回输入') : (language === 'en' ? ' ↑↓/Tab switch · Enter inspect · Esc back' : ' ↑↓/Tab 切换 · Enter 查看 · Esc 返回')) :
         (language === 'en' ? ' ↓ inspect · Ctrl-b ↓ include history' : ' 空输入框 ↓ 查看 · Ctrl-b ↓ 包含历史');
       lines.push(styledRow({ spans: [[hint, 'dim']] }, width, colors));
     }
@@ -491,7 +499,7 @@ class HudController {
     while (lines.length < height - 1) lines.push('');
     const action = this.availableAction();
     const en = this.snapshot.display?.language === 'en';
-    const hint = (en ? ' ↑↓ scroll · Esc back' : ' ↑↓ 滚动 · Esc 返回') + (action === 'stop' ? (en ? ' · S stop request' : ' · S 停止请求') : action === 'retry' ? (en ? ' · R retry request' : ' · R 重试请求') : '');
+    const hint = (en ? ' ↑↓ switch · j/k/PgUp/PgDn scroll · Esc back' : ' ↑↓ 切换 · j/k/PgUp/PgDn 滚动 · Esc 返回') + (action === 'stop' ? (en ? ' · S stop request' : ' · S 停止请求') : action === 'retry' ? (en ? ' · R retry request' : ' · R 重试请求') : '');
     lines.push(styledRow({ spans: [[hint, 'dim']] }, width, colors));
     return lines;
   }
