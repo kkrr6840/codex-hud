@@ -582,13 +582,18 @@ def watch(runtime):
             time.sleep(0.5)
             shutil.rmtree(runtime, ignore_errors=True)
             break
-        if tmux(spec["socket"], "has-session", "-t", "codex", check=False).returncode:
+        # A successful pane query also proves the private session is alive.
+        # Only probe the session separately on a failed pane query.
+        dead = tmux(spec["socket"], "display-message", "-p", "-t", spec["top"], "#{pane_dead}", check=False)
+        if dead.returncode and tmux(spec["socket"], "has-session", "-t", "codex", check=False).returncode:
             shutil.rmtree(runtime, ignore_errors=True)
             break
-        dead = tmux(spec["socket"], "display-message", "-p", "-t", spec["top"], "#{pane_dead}", check=False)
         if dead.stdout.strip() == "1":
             atomic_json(runtime / "exit.json", {"code": 1, "time": time.time(), "error": "CLI runner exited"})
-        time.sleep(0.5)
+            continue
+        # Terminal disconnect cleanup is immediate in tmux; this poll only
+        # handles abnormal pane exits and removes the owned temporary files.
+        time.sleep(1)
     return 0
 
 

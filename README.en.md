@@ -29,6 +29,8 @@ v0.7.4 fixes missing text after full, nearly full, or empty bars in the macOS pa
 
 v0.7.9 reduces overhead in long sessions and multiple windows. Tool history uses separate indexed ranges for new and updated records instead of repeatedly scanning old items. The macOS panel recomputes layout only after snapshot, size or input changes and batches geometry queries into one tmux call. Preferences and turn clocks still update about once a second; active Mac observers can refresh in place. These changes do not establish a terminal scrolling frame-rate guarantee.
 
+v0.7.11 checks file metadata without reopening unchanged session logs. Appends, completed partial lines, replacements, truncation, and recovery after deletion still trigger reads. Historical tool commands parse their full body only when unwrapping `-c` / `-lc`, reducing initial work on long scripts. The macOS cleanup watcher makes about one normal tmux query per second instead of four; tmux still ends terminal-owned sessions immediately on disconnect. Abnormal exits and temporary-directory cleanup are checked about once a second, independently of display, preference, clock, and input handling.
+
 Windows v0.7.1 recognizes the official npm platform-package aliases and records the exact Python interpreter used for setup. The launcher uses that executable directly instead of PATH's `python`, `py`, batch shims, or application aliases. If it becomes unavailable, the launcher warns before falling back to the official CLI. Existing Windows installations must run the hud skill's automatic setup once after upgrading to replace their generated `codex.cmd`.
 
 ## Requirements

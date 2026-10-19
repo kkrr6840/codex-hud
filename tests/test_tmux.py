@@ -190,6 +190,16 @@ f.close()
         self.tmux(spec, "kill-server")
         self.wait_for(lambda: not Path(spec["runtime"]).exists())
 
+    def test_dead_runner_closes_only_its_private_server(self):
+        import signal
+        spec, other = self.launch(), self.launch()
+        self.wait_for(lambda: self.snapshot(spec).get("root", {}).get("id"))
+        runner = int(self.tmux(spec, "display-message", "-p", "-t", spec["top"], "#{pane_pid}").stdout.strip())
+        os.kill(runner, signal.SIGKILL)
+        self.wait_for(lambda: not Path(spec["runtime"]).exists())
+        self.assertNotEqual(self.tmux(spec, "has-session", "-t", "codex", check=False).returncode, 0)
+        self.assertEqual(self.tmux(other, "has-session", "-t", "codex", check=False).returncode, 0)
+
     @unittest.skipUnless(sys.platform == "darwin", "macOS BSD script PTY test")
     def test_closing_terminal_stops_owned_cli_tools_and_hud_but_keeps_history(self):
         other = self.launch()

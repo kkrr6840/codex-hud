@@ -8,10 +8,27 @@ import unittest
 from unittest.mock import patch
 
 from codex_hud.display import clean, elapsed, lines
-from codex_hud.sources import Collector, Diagnostic, Rollout, offload_job, turn_state, response_json, literal_tool_requests, database
+from codex_hud.sources import Collector, Diagnostic, Rollout, offload_job, turn_state, response_json, literal_tool_requests, database, command_text
 
 
 class SourcesTest(unittest.TestCase):
+    def test_command_text_preserves_ordinary_commands_and_quoted_shell_wrappers(self):
+        cases = [
+            ("git status --short", "git status --short"),
+            ('python3 task.py --task "a long task"', 'python3 task.py --task "a long task"'),
+            ('"/path with spaces/sh" "-lc" "echo hello"', "echo hello"),
+            ("/bin/sh '-l''c' 'echo hello'", "echo hello"),
+            ("/bin/sh -c ''", ""),
+            ('/bin/sh -c "echo hello" extra', '/bin/sh -c "echo hello" extra'),
+            ('echo "unfinished', 'echo "unfinished'),
+            ('/bin/sh -c "unfinished', '/bin/sh -c "unfinished'),
+            ('/bin/sh -c "first\nsecond"', "first\nsecond"),
+        ]
+        for value, expected in cases:
+            with self.subTest(command=value):
+                self.assertEqual(command_text({"command": value}), expected)
+        self.assertEqual(command_text({"command": "outer", "commandActions": [{"command": "inner"}]}), "inner")
+
     def test_unchanged_large_tool_history_uses_incremental_index_ranges(self):
         self.thread("root-A")
         self.history.executescript("CREATE UNIQUE INDEX item_page ON thread_items(thread_id,rollout_ordinal); CREATE INDEX item_updated ON thread_items(thread_id,updated_at_ordinal);")
@@ -184,6 +201,41 @@ class SourcesTest(unittest.TestCase):
         self.assertEqual(data["context_used"], 25)
         self.assertEqual(data["context_window"], 100)
         self.assertEqual(data["usage"]["total_tokens"], 200)
+
+    def test_idle_rollout_reuses_data_without_opening_and_retries_partial_appends(self):
+        path = self.thread("root-A")
+        reader = Rollout(path)
+        reader.refresh()
+        with patch.object(Path, "open", side_effect=AssertionError("unchanged logs should not be opened")):
+            self.assertEqual(reader.refresh()["id"], "root-A")
+        record = json.dumps({"type": "event_msg", "payload": {"type": "token_count", "info": {"last_token_usage": {"input_tokens": 42}}}}) + "\n"
+        with path.open("a") as handle:
+            handle.write(record[:40])
+        self.assertNotIn("context_used", reader.refresh())
+        with patch.object(Path, "open", side_effect=AssertionError("unchanged partial tails should not be reopened")):
+            self.assertNotIn("context_used", reader.refresh())
+        with path.open("a") as handle:
+            handle.write(record[40:])
+        self.assertEqual(reader.refresh()["context_used"], 42)
+
+    def test_rollout_cache_detects_rewrites_rotation_truncation_and_delete_restore(self):
+        path = self.thread("root-A")
+        reader = Rollout(path)
+        reader.refresh()
+        # Same-length in-place replacement must not retain the previous id.
+        path.write_text(path.read_text().replace('root-A', 'root-B'))
+        self.assertEqual(reader.refresh()["id"], "root-B")
+        replacement = path.with_suffix(".new")
+        replacement.write_text(json.dumps({"type": "session_meta", "payload": {"id": "rotated"}}) + "\n")
+        replacement.replace(path)
+        self.assertEqual(reader.refresh()["id"], "rotated")
+        path.write_text("")
+        self.assertEqual(reader.refresh(), {})
+        path.unlink()
+        self.assertIn("error", reader.refresh())
+        path.write_text(json.dumps({"type": "session_meta", "payload": {"id": "restored"}}) + "\n")
+        self.assertEqual(reader.refresh()["id"], "restored")
+        self.assertNotIn("error", reader.data)
 
     def test_partial_first_line_is_retried_before_advancing_offset(self):
         path = self.home / "partial.jsonl"

@@ -146,6 +146,7 @@ class Rollout:
         self.path = Path(path)
         self.offset = 0
         self.inode = None
+        self.signature = None
         self.data = {}
         self.jobs = {}
         self.calls = {}
@@ -156,7 +157,11 @@ class Rollout:
     def refresh(self):
         try:
             stat = self.path.stat()
-            if self.inode != stat.st_ino or stat.st_size < self.offset:
+            signature = (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
+            if signature == self.signature:
+                return self.data
+            rewritten = self.signature and stat.st_size == self.signature[2]
+            if self.inode != stat.st_ino or stat.st_size < self.offset or rewritten:
                 self.offset, self.data, self.inode = 0, {}, stat.st_ino
                 self.jobs.clear()
                 self.calls.clear()
@@ -189,7 +194,10 @@ class Rollout:
                         self.consume(json.loads(line))
                     except (ValueError, TypeError):
                         continue
+            self.signature = signature
+            self.data.pop("error", None)
         except OSError as error:
+            self.signature = None
             self.offset = 0
             self.data = {k: self.data[k] for k in ("id", "cwd", "model") if k in self.data}
             self.data.update(status="unknown", error=str(error))
@@ -501,9 +509,16 @@ def command_text(item):
         if isinstance(action, dict) and isinstance(action.get("command"), str):
             return action["command"]
     try:
-        parts = shlex.split(text)
-        if len(parts) == 3 and parts[1] in ("-lc", "-c"):
-            return parts[2]
+        # Ordinary commands need no shell unwrapping. Stop after the second
+        # token instead of parsing long scripts, heredocs and task text.
+        lexer = shlex.shlex(text, posix=True)
+        lexer.whitespace_split = True
+        lexer.commenters = ""
+        lexer.get_token()
+        if lexer.get_token() in ("-lc", "-c"):
+            body = lexer.get_token()
+            if body is not None and lexer.get_token() is None:
+                return body
     except ValueError:
         pass
     return text
