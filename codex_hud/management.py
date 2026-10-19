@@ -79,5 +79,6 @@ def stage_request(runtime, root, key, action, expected):
     finally:
         tmux(spec["socket"], "delete-buffer", "-b", buffer, check=False)
     clear(runtime, spec)
-    tmux(spec["socket"], "select-pane", "-t", spec["top"])
+    if not (runtime / "view.json").exists():
+        tmux(spec["socket"], "select-pane", "-t", spec["top"])
     return draft

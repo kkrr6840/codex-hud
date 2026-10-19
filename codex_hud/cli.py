@@ -204,9 +204,9 @@ def bind_settings(spec):
 
 
 def bind_agents(spec):
-    popup = ("display-popup", "-E", "-w", "90%", "-h", "85%", command("_agents", spec["runtime"], runtime=spec["runtime"]))
-    tmux(spec["socket"], "bind-key", "Down", *popup)
-    tmux(spec["socket"], "bind-key", "-n", "M-Down", *popup)
+    view = ("run-shell", command("_view", spec["runtime"], runtime=spec["runtime"]))
+    tmux(spec["socket"], "bind-key", "Down", *view)
+    tmux(spec["socket"], "bind-key", "-n", "M-Down", *view)
     tmux(spec["socket"], "bind-key", "-n", "Down", "run-shell", command("_down", spec["runtime"], "#{pane_id}", runtime=spec["runtime"]))
     active = "#{&&:#{==:#{@hud-nav},1},#{||:#{==:#{pane_id}," + spec["hud"] + "},#{&&:#{==:#{pane_id}," + spec["top"] + "},#{==:#{pane_active},0}}}}"
     for key in ("Up", "Enter", "Escape"):
@@ -406,36 +406,64 @@ def toggle(runtime):
 
 
 def sync_layout(spec, snapshot):
+    from .viewer import layout_lock
+    with layout_lock(spec["runtime"]):
+        return _sync_layout(spec, snapshot)
+
+
+def _sync_layout(spec, snapshot):
     """Keep empty HUDs off-screen and size visible panels to their content."""
     if not spec.get("hud"):
         return False
     socket = spec["socket"]
-    geometry = tmux(socket, "display-message", "-p", "-t", spec["top"],
-                    "#{window_id} #{window_height} #{window_width} #{window_zoomed_flag}", ";",
+    from .viewer import state, close_view
+    view = state(spec["runtime"])
+    if view and not view.get("ready"):
+        # Opening holds layout_lock until ready. Seeing an incomplete swap
+        # under this lock means its helper exited and needs recovery.
+        if not close_view(spec["runtime"], locked=True):
+            return False
+        return _sync_layout(spec, snapshot)
+    top = view.get("pane") if view.get("ready") else spec["top"]
+    geometry = tmux(socket, "display-message", "-p", "-t", top,
+                    "#{window_id} #{window_height} #{window_width} #{window_zoomed_flag} #{pane_dead}", ";",
                     "display-message", "-p", "-t", spec["hud"], "#{window_id} #{pane_height}", check=False).stdout.splitlines()
     if len(geometry) != 2:
+        if view:
+            if not close_view(spec["runtime"], locked=True):
+                return False
+            return _sync_layout(spec, snapshot)
         return False
     main, panel_info = (line.split() for line in geometry)
-    if len(main) != 4 or len(panel_info) != 2:
+    if len(main) != 5 or len(panel_info) != 2:
+        if view:
+            if not close_view(spec["runtime"], locked=True):
+                return False
+            return _sync_layout(spec, snapshot)
         return False
+    if view and main[4] == "1":
+        if not close_view(spec["runtime"], locked=True):
+            return False
+        return _sync_layout(spec, snapshot)
     rows = render_rows(snapshot, int(main[2]))
     docked = main[0] == panel_info[0]
     if not rows:
         if docked:
             if main[3] == "1":
-                tmux(socket, "resize-pane", "-t", spec["top"], "-Z", check=False)
+                tmux(socket, "resize-pane", "-t", top, "-Z", check=False)
             tmux(socket, "break-pane", "-d", "-s", spec["hud"], "-n", "_hud", check=False)
-            tmux(socket, "select-pane", "-t", spec["top"], check=False)
+            tmux(socket, "select-pane", "-t", top, check=False)
         return False
     desired = min(snapshot.get("display", {}).get("height", spec["hud_height"]), max(1, int(main[1]) // 2), len(rows))
     if not docked:
-        tmux(socket, "join-pane", "-d", "-v", "-l", desired, "-s", spec["hud"], "-t", spec["top"], check=False)
+        tmux(socket, "join-pane", "-d", "-v", "-l", desired, "-s", spec["hud"], "-t", top, check=False)
     elif main[3] == "0" and int(panel_info[1]) != desired:
         tmux(socket, "resize-pane", "-t", spec["hud"], "-y", desired, check=False)
     return docked and main[3] == "1"
 
 
 def panel(runtime):
+    from .viewer import state as view_state, close_view, open_view
     runtime = Path(runtime)
     atomic_json(runtime / "panel.json", {"pid": os.getpid()})
     spec = read_json(runtime / "spec.json")
@@ -458,16 +486,17 @@ def panel(runtime):
             if (runtime / "exit.json").exists():
                 break
             nav = read_json(runtime / "navigation.json", {})
+            viewing = bool(view_state(runtime).get("ready"))
             selected = (tuple(nav.get("key") or []) or None) if snapshot else None
             view = snapshot
             if selected and snapshot:
                 from .keys import clear
                 view = {**snapshot, "display": {**snapshot["display"], "agents_limit": 0}}
                 choices = [row.key for row in render_rows(view) if row.key]
-                main_active = tmux(spec["socket"], "display-message", "-p", "-t", spec["top"], "#{pane_active}").stdout.strip() == "1"
+                main_active = not viewing and tmux(spec["socket"], "display-message", "-p", "-t", spec["top"], "#{pane_active}").stdout.strip() == "1"
                 if nav.get("root") != snapshot["root"].get("id") or selected not in choices or main_active:
                     clear(runtime, spec)
-                    if not main_active:
+                    if not main_active and not viewing:
                         tmux(spec["socket"], "select-pane", "-t", spec["top"])
                     selected = None
                     view = snapshot
@@ -477,7 +506,7 @@ def panel(runtime):
                 raw_key = None
             # Unicode codepoints can overlap curses' integer key constants.
             key = (ord(raw_key) if ord(raw_key) < 128 else -2) if isinstance(raw_key, str) else raw_key if raw_key is not None else -1
-            if key != -1 and not selected and tmux(spec["socket"], "display-message", "-p", "-t", spec["top"], "#{pane_active}").stdout.strip() == "1":
+            if key != -1 and not selected and not viewing and tmux(spec["socket"], "display-message", "-p", "-t", spec["top"], "#{pane_active}").stdout.strip() == "1":
                 # A burst can already be buffered in this pane when typing
                 # returns focus to the CLI. Forward the rest instead of losing
                 # the second character (including multibyte Unicode input).
@@ -492,19 +521,19 @@ def panel(runtime):
             if selected and key in (curses.KEY_DOWN, curses.KEY_UP, 10, 13, curses.KEY_ENTER, 27):
                 from .keys import clear
                 if key == 27 or (key == curses.KEY_UP and choices.index(selected) == 0):
+                    close_view(runtime)
                     clear(runtime, spec)
                     selected = None
                     tmux(spec["socket"], "select-pane", "-t", spec["top"])
                 elif key in (10, 13, curses.KEY_ENTER):
-                    subprocess.Popen(["tmux", "-L", spec["socket"], "display-popup", "-E", "-w", "90%", "-h", "85%",
-                                      command("_agents", runtime, "--focus", json.dumps(selected), "--root", nav["root"], "--detail", runtime=runtime)],
-                                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    open_view(runtime, selected, nav["root"], True)
                 else:
                     index = max(0, min(len(choices)-1, choices.index(selected)+(1 if key == curses.KEY_DOWN else -1)))
                     selected = choices[index]
                     atomic_json(runtime / "navigation.json", {"root": nav["root"], "key": selected})
             elif selected and (isinstance(raw_key, str) or key == curses.KEY_BACKSPACE):
                 from .keys import clear
+                close_view(runtime)
                 clear(runtime, spec)
                 selected = None
                 tmux(spec["socket"], "select-pane", "-t", spec["top"])
@@ -513,8 +542,7 @@ def panel(runtime):
                 else:
                     tmux(spec["socket"], "send-keys", "-t", spec["top"], "-l", raw_key)
             elif key == curses.KEY_DOWN and not expanded and snapshot and (snapshot["agents"] or snapshot["offload"]["jobs"]):
-                subprocess.Popen(["tmux", "-L", spec["socket"], "display-popup", "-E", "-w", "90%", "-h", "85%", command("_agents", runtime, runtime=runtime)],
-                                 stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                open_view(runtime)
             elif key in (curses.KEY_DOWN, ord("j")):
                 scroll += 1
             elif key in (curses.KEY_UP, ord("k")):
@@ -524,6 +552,7 @@ def panel(runtime):
             elif key in (curses.KEY_END, ord("G")):
                 scroll = 10**6
             elif key == 27:
+                close_view(runtime)
                 spec = read_json(runtime / "spec.json", spec)
                 zoomed = tmux(spec["socket"], "display-message", "-p", "#{window_zoomed_flag}").stdout.strip()
                 if zoomed == "1":
@@ -552,7 +581,8 @@ def panel(runtime):
                 if nav.get("root") != snapshot["root"].get("id") or selected not in [r.key for r in render_rows(view) if r.key]:
                     from .keys import clear
                     clear(runtime, spec)
-                    tmux(spec["socket"], "select-pane", "-t", spec["top"])
+                    if not view_state(runtime).get("ready"):
+                        tmux(spec["socket"], "select-pane", "-t", spec["top"])
                     selected = None
                     view = snapshot
             else:
@@ -677,6 +707,8 @@ def refresh_panels(argv):
         if spec.get("socket") != runtime.name or not spec.get("hud") or not spec.get("top"):
             continue
         socket = spec["socket"]
+        from .viewer import close_view
+        close_view(runtime)
         before = tmux(socket, "display-message", "-p", "-t", spec["top"], "#{pane_pid}").stdout.strip()
         configure_terminal(spec)
         tmux(socket, "respawn-pane", "-k", "-t", spec["hud"], command("_panel", runtime, runtime=runtime))
@@ -708,15 +740,19 @@ def main(argv=None):
     if argv and argv[0] in ("setup", "configure"):
         from .integration import configure
         return configure(argv[1:])
-    if argv and argv[0] == "_agents":
+    if argv and argv[0] in ("_agents", "_view"):
         from .agents import run
         parser = argparse.ArgumentParser(add_help=False)
         parser.add_argument("runtime")
         parser.add_argument("--focus", type=json.loads)
         parser.add_argument("--root")
         parser.add_argument("--detail", action="store_true")
+        parser.add_argument("--embedded", action="store_true")
         args = parser.parse_args(argv[1:])
-        return run(args.runtime, args.focus, args.root, args.detail)
+        if argv[0] == "_view":
+            from .viewer import open_view
+            return open_view(args.runtime, args.focus, args.root, args.detail)
+        return run(args.runtime, args.focus, args.root, args.detail, args.embedded)
     if argv and argv[0] == "_down":
         from .keys import down
         return down(argv[1], argv[2])

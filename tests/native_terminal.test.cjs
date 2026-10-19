@@ -15,6 +15,14 @@ const row = (text, id, pinned = false) => ({ spans: [[text, id ? 'agent' : 'mode
 const packet = (root = 'root-a', rows = [row('Codex model', null, true), row('agent Alpha', 'a'), row('agent Beta', 'b')]) =>
   ({ type: 'snapshot', snapshot: { root: { id: root }, display: { height: 6, language: 'en', colors: { agent: '#ff0088' } } }, rows, all_rows: rows });
 const input = (raw, name) => ({ raw, name });
+
+test('Ctrl-C leaves a child view without interrupting the hidden main task', () => {
+  const controller = new hud.HudController(); controller.update(packet());
+  controller.enterHud(); controller.input(input('\r', 'enter'), true);
+  assert.equal(controller.input(input('\x03', 'interrupt'), false).consumed, true);
+  assert.equal(controller.mode, 'cli');
+  assert.equal(controller.input(input('\x03', 'interrupt'), false).consumed, false);
+});
 const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
 async function until(predicate, message, timeout = 6000) {
   const deadline = Date.now() + timeout;
@@ -83,7 +91,7 @@ test('streaming key decoder preserves unknown edit sequences and bracketed paste
   assert.ok(parts.every(part => part.name === 'paste'));
 });
 
-test('empty Down selects in HUD, arrows move, Enter requests detail and two Esc return', () => {
+test('empty Down selects in HUD, arrows move, Enter requests detail and one Esc returns to input', () => {
   const requests = [], controller = new hud.HudController(request => requests.push(request));
   controller.update(packet());
   assert.equal(controller.input(input(`${CSI}B`, 'down'), false).consumed, false);
@@ -100,9 +108,8 @@ test('empty Down selects in HUD, arrows move, Enter requests detail and two Esc 
   controller.update({ type: 'detail', request_id: 1, root: 'root-a', key: ['native', 'b'], lines: ['real output'] });
   assert.ok(controller.overlayLines(10, 80).includes('real output'));
   controller.input(input('\x1b', 'escape'), false);
-  assert.equal(controller.mode, 'hud');
-  controller.input(input('\x1b', 'escape'), false);
   assert.equal(controller.mode, 'cli');
+  assert.equal(controller.selected, null);
 });
 
 test('skill selection and task requests stay scoped, cancellable and draft-only', () => {
@@ -117,7 +124,9 @@ test('skill selection and task requests stay scoped, cancellable and draft-only'
   const first = requests.at(-1);
   assert.equal(requests.filter(r => r.type === 'action').length, 1);
   c.input(input('\x1b', 'escape'), true);
+  assert.equal(c.mode, 'cli');
   c.update({ ...first, draft: 'stale request' }); assert.equal(c.takeDraft(true), null);
+  c.enterHud(); c.input(input('\r', 'enter'), true);
   c.input(input('s', 'other'), true); c.input(input('\r', 'enter'), true);
   c.update({ ...requests.at(-1), draft: 'stop child a' });
   assert.equal(c.takeDraft(false), null); assert.equal(c.mode, 'action');
@@ -230,11 +239,36 @@ test('completed row disappears without closing an open final-output detail', () 
   assert.equal(controller.mode, 'detail');
   controller.update({ type: 'detail', request_id: controller.pendingDetail, root: 'root-a', key: ['native', 'a'], lines: ['Final answer'] });
   assert.ok(controller.overlayLines(10, 80).includes('Final answer'));
+  controller.input(input('\t', 'tab'), false);
+  assert.deepEqual(controller.selected, ['native', 'a'], 'no eligible next item keeps completed detail');
+  assert.ok(controller.hudLines(controller.height(24), 80).some(line => line.includes(`${CSI}0;1;7m`)));
   controller.input(input('\x1b', 'escape'), false);
   assert.equal(controller.mode, 'cli');
   assert.equal(controller.selected, null);
   controller.update(packet()); controller.enterHud(); controller.update(finished);
   assert.equal(controller.mode, 'cli', 'selection returns to input when the selected row completes');
+});
+
+test('detail cycles skills and tasks with stable HUD height and scoped replies', () => {
+  const requests = [], c = new hud.HudController(r => requests.push(r));
+  const skill = { spans: [['Skills demo', 'agent']], key: ['skills', 'turn'] };
+  const p = packet('root', [skill, ...Array.from({ length: 12 }, (_, i) => row(`agent ${i}`, String(i)))]);
+  p.snapshot.root.skills = ['demo']; p.snapshot.root.skill_turn_id = 'turn';
+  c.update(p); c.enterHud();
+  const height = c.height(24), decoder = new hud.InputDecoder();
+  c.input(input('\r', 'enter'), true);
+  const old = requests.at(-1);
+  c.input(decoder.push(`${CSI}Z`)[0], false);
+  assert.deepEqual(c.selected, ['native', '11']);
+  assert.equal(c.mode, 'detail'); assert.equal(c.height(24), height);
+  assert.ok(c.hudLines(height, 80).some(line => line.includes(`${CSI}0;1;7magent 11`)));
+  c.update({ ...old, lines: ['stale skill'] });
+  assert.deepEqual(c.detailLines, ['Loading…']);
+  c.input(decoder.push('\t')[0], false);
+  assert.deepEqual(c.selected, skill.key);
+  c.input(input('\x1b', 'escape'), false);
+  assert.equal(c.mode, 'cli');
+  assert.equal(c.input(decoder.push('\t')[0], false).consumed, false);
 });
 
 test('detail refresh rejects stale requests and root changes clear selection', () => {
@@ -438,7 +472,7 @@ const fs = require('node:fs');
 const log = value => fs.appendFileSync(${JSON.stringify(inputLog)}, JSON.stringify(value) + '\\n');
 log({env:{thread:process.env.CODEX_THREAD_ID,session:process.env.CODEX_SESSION_ID,active:process.env.CODEX_HUD_ACTIVE,log:process.env.RUST_LOG},pid:process.pid});
 process.stdin.setRawMode(true); process.stdin.setEncoding('utf8'); let draft='';
-function draw(){ process.stdout.write('\\x1b[?2026h\\x1b[2J\\x1b[10;1H› '+(draft || '\\x1b[2mAsk Codex to do anything\\x1b[0m')+'\\x1b[10;'+(3+draft.length)+'H\\x1b[?25h\\x1b[?2026l'); }
+function draw(){ process.stdout.write('\\x1b[?2026h\\x1b[2J\\x1b[1;1HFixture '+process.stdout.columns+'x'+process.stdout.rows+'\\x1b[10;1H› '+(draft || '\\x1b[2mAsk Codex to do anything\\x1b[0m')+'\\x1b[10;'+(3+draft.length)+'H\\x1b[?25h\\x1b[?2026l'); }
 draw(); process.stdout.on('resize',()=>{ log({resize:[process.stdout.columns,process.stdout.rows]}); draw(); });
 process.stdin.on('data',data=>{ log({input:data}); const text=data.replace(/\\x1b(?:\\[[0-?]*[ -/]*[@-~]|O[@-~])/g,''); for(const char of text){ if(char==='\\x7f') draft=draft.slice(0,-1); else if(char==='\\r'){ if(draft==='/quit') process.exit(0); draft=''; } else if(char>=' ')draft+=char; } draw(); });
 `);
@@ -446,7 +480,7 @@ process.stdin.on('data',data=>{ log({input:data}); const text=data.replace(/\\x1
 const fs=require('node:fs'); const readline=require('node:readline'); let tick=0;
 const log=value=>fs.appendFileSync(${JSON.stringify(bridgeLog)},JSON.stringify(value)+'\\n'); log({pid:process.pid});
 const emit=value=>process.stdout.write(JSON.stringify(value)+'\\n');
-function update(){ const hidden=fs.existsSync(${JSON.stringify(path.join(base, 'hide'))}); const switched=fs.existsSync(${JSON.stringify(path.join(base, 'switch'))}); const skills=fs.existsSync(${JSON.stringify(path.join(base, 'skills'))}); const rows=hidden?[]:skills?[{spans:[['Skills demo','agent']],key:['skills','skill-turn']}]:${JSON.stringify(packet().rows)}; emit({type:'snapshot',snapshot:{root:{id:switched?'root-b':'root-a',skills:skills?['demo']:[],skill_turn_id:'skill-turn'},agents:[{id:'a',status:'running',turn_id:'test-turn',started:1}],display:{height:6,language:'en'}},rows,all_rows:rows}); }
+function update(){ const hidden=fs.existsSync(${JSON.stringify(path.join(base, 'hide'))}); const switched=fs.existsSync(${JSON.stringify(path.join(base, 'switch'))}); const skills=fs.existsSync(${JSON.stringify(path.join(base, 'skills'))}); const rows=hidden?[]:skills?[{spans:[['Skills demo','agent']],key:['skills','skill-turn']},...${JSON.stringify(packet().rows)}]:${JSON.stringify(packet().rows)}; emit({type:'snapshot',snapshot:{root:{id:switched?'root-b':'root-a',skills:skills?['demo']:[],skill_turn_id:'skill-turn'},agents:[{id:'a',status:'running',turn_id:'test-turn',started:1}],display:{height:6,language:'en'}},rows,all_rows:rows}); }
 readline.createInterface({input:process.stdin}).on('line',line=>{ const req=JSON.parse(line); log(req); if(req.type==='detail')emit({...req,lines:[req.key[0]==='skills'?'Skill source /fixture/SKILL.md':'Live agent output '+(++tick)]}); if(req.type==='action')emit({...req,draft:'HUD request for '+req.key[1]}); });
 setTimeout(update,150); setInterval(update,150);
 `);
@@ -487,10 +521,16 @@ setTimeout(update,150); setInterval(update,150);
     assert.ok(!inputs().includes(`${CSI}B`), 'empty Down was not delivered to official CLI');
     outer.write('\r');
     await until(() => visible().includes('Live agent output'), 'Enter opened real bridge detail');
+    assert.ok(selected(), 'detail keeps bottom HUD selected');
+    assert.ok(visible().indexOf('Live agent output') < visible().indexOf('agent Alpha'), 'detail occupies upper viewport');
     await until(() => requests().filter(req => req.type === 'detail').length >= 2, 'detail refreshed from live snapshots');
     outer.write('s'); await until(() => visible().includes('prepare draft'), 'stop request confirmation visible');
-    outer.write('\x1b'); await until(() => visible().includes('Live agent output'), 'cancel returns to task details');
+    assert.ok(selected(), 'action confirmation keeps bottom HUD selected');
+    outer.write('\x1b'); await until(() => visible().includes('› Ask Codex') && !selected(), 'cancel returns directly to main');
     assert.equal(requests().filter(req => req.type === 'action').length, 0);
+    await until(() => visible().includes('Fixture 80x21') && Date.now() - lastOutput >= 100, 'cancelled view resize settled');
+    outer.write(`${CSI}B`); await until(selected, 'task selected after cancellation');
+    outer.write('\r'); await until(() => visible().includes('Live agent output'), 'task view reopened after cancellation');
     outer.write('s'); await until(() => visible().includes('prepare draft'), 'confirm view reopened');
     const inputBefore = inputs().length;
     outer.write('\r'); await until(() => visible().includes('› HUD request for a'), 'request staged in native composer');
@@ -500,18 +540,25 @@ setTimeout(update,150); setInterval(update,150);
     await until(() => visible().includes('› Ask Codex') && Date.now() - lastOutput >= 100, 'skill layout resize settled');
     outer.write(`${CSI}B`); await until(() => selected('Skills demo'), 'skill row selected');
     outer.write('\r'); await until(() => visible().includes('Skill source /fixture/SKILL.md'), 'skill details work through real PTY');
-    outer.write('\x1b'); await wait(100); outer.write('\x1b'); await wait(100);
-    fs.unlinkSync(path.join(base, 'skills')); await until(() => visible().includes('agent Alpha'), 'agent rows restored');
-    await until(() => visible().includes('› Ask Codex') && Date.now() - lastOutput >= 100, 'restored agent layout resize settled');
+    assert.ok(selected('Skills demo'));
+    outer.write('\t'); await until(() => visible().includes('Live agent output') && selected(), 'Tab switches skill to task inline');
+    outer.write(`${CSI}Z`); await until(() => visible().includes('Skill source /fixture/SKILL.md') && selected('Skills demo'), 'Shift-Tab returns to skill inline');
+    outer.write('\x1b'); await until(() => visible().includes('› Ask Codex') && !selected('Skills demo'), 'single Esc restored CLI');
+    fs.unlinkSync(path.join(base, 'skills')); await until(() => visible().includes('agent Alpha') && !visible().includes('Skills demo'), 'agent rows restored');
+    await until(() => visible().includes('Fixture 80x21') && visible().includes('› Ask Codex') && Date.now() - lastOutput >= 100, 'restored agent layout resize settled');
     outer.write(`${CSI}B`); await until(selected, 'agent row selected after layout change');
     outer.write('\r'); await until(() => visible().includes('Live agent output'), 'agent details reopened');
-    outer.write('\x1b'); await until(selected, 'first Esc returned to HUD selection');
-    outer.write('\x1b'); await wait(100);
+    outer.write('\x1b'); await until(() => visible().includes('› Ask Codex') && !selected(), 'single Esc restored CLI input');
     outer.write(`z${CSI}B`);
     await until(() => inputs().includes(`z${CSI}B`) && visible().includes('› z'), 'same-chunk draft plus Down passed through');
     assert.equal(selected(), false, 'pending native edit cannot select HUD using stale empty screen');
     outer.write('\x7f'); await until(() => visible().includes('› Ask Codex'), 'rapid draft erased');
     outer.write('x'); await until(() => visible().includes('› x'), 'native draft preserved');
+    outer.write(`${CSI}1;3B`); await until(selected, 'explicit selection preserves existing draft');
+    outer.write('\r'); await until(() => visible().includes('Live agent output') && selected(), 'draft hidden by inline child view');
+    const beforeDetailEscape = inputs();
+    outer.write('\x1b'); await until(() => visible().includes('› x') && !selected(), 'single Esc restores original native draft');
+    assert.equal(inputs(), beforeDetailEscape, 'view navigation never reaches CLI input');
     outer.write(`${CSI}B`); await until(() => inputs().includes(`${CSI}B`), 'draft Down passed to official CLI');
     outer.write('\x7f'); await until(() => visible().includes('› Ask Codex'), 'backspace editing restored empty composer');
     outer.write(`${CSI}B`); await until(selected, 'agent selected again');
@@ -625,8 +672,8 @@ process.stdin.on('data',data=>{const text=data.replace(/\\x1b(?:\\[[0-?]*[ -/]*[
     outer.write(`${CSI}B`); await until(selected, 'plain Down selected actual correlated agent');
     outer.write('\r'); await until(() => visible().includes(answer), 'real Python details returned actual child answer');
     assert.deepEqual(fs.readFileSync(childLog), beforeLog, 'viewing details never changes or resumes the child session');
-    outer.write('\x1b'); await until(selected, 'first Esc returned to actual HUD');
-    outer.write('\x1b'); await wait(100);
+    assert.ok(selected(), 'bottom HUD remains selected in detail');
+    outer.write('\x1b');
     await until(() => visible().includes('Working (4m 51s)') && !selected(), 'returned to the frozen official fixture');
     const history = spawnSync(python, ['-c', `
 import sqlite3,sys,time

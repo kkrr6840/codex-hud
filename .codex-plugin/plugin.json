@@ -1,6 +1,6 @@
 {
   "name": "codex-hud",
-  "version": "0.8.0",
+  "version": "0.8.1",
   "description": "Persistent Codex CLI HUD with inline agent navigation, native Windows support, and session-scoped usage.",
   "skills": "./skills/"
 }

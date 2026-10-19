@@ -112,7 +112,9 @@ After an upgrade, the hud skill can refresh the macOS observer while keeping the
 
 ## Task management and Skill details (v0.8)
 
-Press **Down** from the default empty composer to highlight the first selectable Skills or agent row. **Up/Down** selects, **Enter** opens details, and **Esc** returns to the HUD and then to the input. Up from the first entry also returns to the input. With a draft, a native menu, or no selectable rows, Down passes through to Codex.
+Press **Down** from the default empty composer to highlight the first selectable Skills or agent row. **Up/Down** selects and **Enter** opens the recorded content. Starting with v0.8.1, it replaces the upper conversation area while the bottom HUD stays visible. **One Esc** returns to the main conversation and its draft; **Tab / Shift-Tab** switches between eligible entries. The original CLI keeps running in the background. Up from the first selected row also returns to input. With a draft, a native menu, or no selectable rows, ordinary Down passes through to Codex.
+
+Task and Skill views are read-only and use the existing upper viewport rather than a popup or another CLI. On macOS the original CLI pane and PTY remain alive, and a failed viewer restores that pane. Stop/retry request preparation remains available in task details.
 
 Select **Skills** and press Enter to inspect all recorded names, descriptions, sources, original paths, and read times for the main thread's current turn. Details are not limited by `skills_limit`; same-named skills at different paths remain separate. Descriptions come from attributable successful read output, not from opening logged paths. Missing metadata stays unavailable and the list resets on the next turn.
 

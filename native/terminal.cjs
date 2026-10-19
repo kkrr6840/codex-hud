@@ -224,7 +224,7 @@ class InputDecoder {
       }
       if (this.buffer[0] !== '\x1b') {
         const char = [...this.buffer][0];
-        const names = { '\r': 'enter', '\n': 'enter', '\x02': 'prefix', '\x03': 'interrupt' };
+        const names = { '\r': 'enter', '\n': 'enter', '\x02': 'prefix', '\x03': 'interrupt', '\t': 'tab' };
         emit(char, names[char] || 'other');
         this.buffer = this.buffer.slice(char.length);
         continue;
@@ -233,7 +233,7 @@ class InputDecoder {
       if (sequence) {
         const raw = sequence[0];
         const name = /^\x1b(?:\[|O)B$/.test(raw) ? 'down' : /^\x1b(?:\[|O)A$/.test(raw) ? 'up' :
-          /^\x1b\[1;3B$/.test(raw) ? 'altDown' : raw === `${CSI}19~` ? 'config' : raw === `${CSI}200~` ? 'paste' : 'other';
+          /^\x1b\[1;3B$/.test(raw) ? 'altDown' : raw === `${CSI}Z` ? 'shiftTab' : raw === `${CSI}19~` ? 'config' : raw === `${CSI}200~` ? 'paste' : 'other';
         emit(raw, name);
         if (raw === `${CSI}200~`) this.paste = true;
         this.buffer = this.buffer.slice(raw.length);
@@ -365,13 +365,13 @@ class HudController {
     if (this.mode === 'cli') {
       return { consumed: (token.name === 'altDown' || (token.name === 'down' && empty)) && this.enterHud() };
     }
-    if (token.name === 'interrupt') { this.pendingConfig = null; this.pendingAction = null; this.pendingDraft = null; this.mode = 'cli'; this.selected = null; return { consumed: false }; }
+    // A read-only child view must not route Ctrl-C into the hidden main task.
+    if (token.name === 'interrupt') { this.pendingConfig = null; this.pendingAction = null; this.pendingDraft = null; this.mode = 'cli'; this.selected = null; return { consumed: true }; }
     if (token.name === 'escape') {
       this.pendingConfig = null;
       this.pendingAction = null; this.pendingDraft = null;
-      if (this.mode === 'action') { this.mode = 'detail'; this.actionChoice = null; return { consumed: true }; }
-      if (this.mode === 'detail' && this.selectable().some(row => keyId(row.key) === keyId(this.selected))) this.mode = 'hud';
-      else { this.mode = 'cli'; this.selected = null; }
+      this.actionChoice = null;
+      this.mode = 'cli'; this.selected = null; this.pendingDetail = null;
       return { consumed: true };
     }
     if (this.mode === 'hud') {
@@ -386,7 +386,15 @@ class HudController {
         this.mode = 'cli'; this.selected = null; return { consumed: false };
       }
     } else if (this.mode === 'detail') {
-      if (token.name === 'down') this.detailOffset = Math.min(Math.max(0, this.wrappedDetails(this.detailWidth).length - this.detailPageRows), this.detailOffset + 1);
+      if (token.name === 'tab' || token.name === 'shiftTab') {
+        const rows = this.selectable();
+        const index = rows.findIndex(row => keyId(row.key) === keyId(this.selected));
+        const next = rows.length ? rows[index < 0 ? (token.name === 'tab' ? 0 : rows.length - 1) :
+          (index + (token.name === 'tab' ? 1 : -1) + rows.length) % rows.length] : null;
+        if (next && keyId(next.key) !== keyId(this.selected)) {
+          this.selected = next.key; this.detailOffset = 0; this.detailLines = ['Loading…']; this.requestDetail();
+        }
+      } else if (token.name === 'down') this.detailOffset = Math.min(Math.max(0, this.wrappedDetails(this.detailWidth).length - this.detailPageRows), this.detailOffset + 1);
       else if (token.name === 'up') this.detailOffset = Math.max(0, this.detailOffset - 1);
       else if ((/^[sS]$/.test(token.raw) && this.availableAction() === 'stop') || (/^[rR]$/.test(token.raw) && this.availableAction() === 'retry')) {
         this.mode = 'action'; this.actionChoice = this.availableAction(); this.actionError = '';
@@ -410,17 +418,28 @@ class HudController {
     }
     return { consumed: true };
   }
+  inspecting() { return ['hud', 'detail', 'action'].includes(this.mode); }
+  visibleHudRows() {
+    const source = this.inspecting() ? (this.showHistory ? this.historyRows : this.allRows) : this.rows;
+    // Keep a completed task represented while its final output is open.
+    if (['detail', 'action'].includes(this.mode) && this.selected && this.selectedItem() &&
+      !source.some(row => keyId(row.key) === keyId(this.selected))) {
+      const recorded = this.historyRows.find(row => keyId(row.key) === keyId(this.selected));
+      return source.concat(recorded || { key: this.selected, spans: [[this.selectedItem().name || this.selected[1], 'agent']] });
+    }
+    return source;
+  }
   height(totalRows, fallback = 11) {
-    const rows = this.mode === 'hud' ? (this.showHistory ? this.historyRows : this.allRows) : this.rows;
+    const rows = this.visibleHudRows();
     if (!rows.length) return 0;
     const desired = Number(this.snapshot.display?.height) || fallback;
-    return Math.max(0, Math.min(desired, Math.floor(totalRows / 2), rows.length + (this.mode === 'hud' ? 1 : 0)));
+    return Math.max(0, Math.min(desired, Math.floor(totalRows / 2), rows.length + Number(this.inspecting())));
   }
   hudLines(height, width) {
     if (!height) return [];
     const colors = { ...DEFAULT_COLORS, ...this.snapshot.display?.colors };
-    const source = this.mode === 'hud' ? (this.showHistory ? this.historyRows : this.allRows) : this.rows;
-    const footer = this.mode === 'hud' || source.length > height;
+    const source = this.visibleHudRows();
+    const footer = this.inspecting() || source.length > height;
     let pinnedCount = 0;
     while (source[pinnedCount]?.pinned) pinnedCount++;
     const pinnedRoom = Math.min(pinnedCount, Math.max(0, height - Number(footer) - Number(source.length > pinnedCount)));
@@ -433,10 +452,10 @@ class HudController {
       if (target >= this.scroll + room) this.scroll = target - room + 1;
     }
     const visible = pinned.concat(details.slice(this.scroll, this.scroll + room));
-    const lines = visible.map(row => styledRow(row, width, colors, this.mode === 'hud' && keyId(row.key) === keyId(this.selected)));
+    const lines = visible.map(row => styledRow(row, width, colors, this.inspecting() && keyId(row.key) === keyId(this.selected)));
     if (footer) {
       const language = this.snapshot.display?.language;
-      const hint = this.mode === 'hud' ? (language === 'en' ? ' ↑↓ select · Enter inspect · Esc back to input' : ' ↑↓ 选择 · Enter 查看 · Esc 返回输入') :
+      const hint = ['detail', 'action'].includes(this.mode) ? (language === 'en' ? ' Tab/Shift-Tab switch · Esc back' : ' Tab/Shift-Tab 切换 · Esc 返回') : this.mode === 'hud' ? (language === 'en' ? ' ↑↓ select · Enter inspect · Esc back to input' : ' ↑↓ 选择 · Enter 查看 · Esc 返回输入') :
         (language === 'en' ? ' ↓ inspect · Ctrl-b ↓ include history' : ' 空输入框 ↓ 查看 · Ctrl-b ↓ 包含历史');
       lines.push(styledRow({ spans: [[hint, 'dim']] }, width, colors));
     }
@@ -565,8 +584,10 @@ async function run(runtime, options = {}) {
     if (closed || screen.pendingWrites || screen.terminal.modes.synchronizedOutputMode) return;
     resizeChild();
     const terminal = screen.terminal, buffer = terminal.buffer.active;
-    const overlay = ['detail', 'config', 'action'].includes(controller.mode);
-    let lines = overlay ? controller.overlayLines(rows, cols) : screen.lines().concat(controller.hudLines(rows - mainRows, cols));
+    const childView = ['detail', 'action'].includes(controller.mode);
+    const upper = childView ? controller.overlayLines(mainRows, cols).slice(0, mainRows) : screen.lines();
+    while (upper.length < mainRows) upper.push('');
+    let lines = controller.mode === 'config' ? controller.overlayLines(rows, cols) : upper.concat(controller.hudLines(rows - mainRows, cols));
     lines = lines.slice(0, rows);
     while (lines.length < rows) lines.push('');
     const tracking = controller.mode === 'cli' ? terminal.modes.mouseTrackingMode : 'none';
@@ -631,7 +652,9 @@ async function run(runtime, options = {}) {
         const hadPrefix = controller.prefix;
         // A key can arrive before the official CLI has echoed the previous
         // edit. Do not select HUD from the stale empty-composer screen.
-        const result = controller.input(token, composer.empty());
+        const empty = composer.empty();
+        debug(`input name=${token.name} mode=${controller.mode} empty=${empty} pending=${composer.pending !== null}`);
+        const result = controller.input(token, empty);
         if (hadPrefix) clearTimeout(prefixTimer);
         if (controller.prefix) prefixTimer = setTimeout(() => { controller.prefix = false; forward('\x02'); }, 2000);
         if (!result.consumed) forward((result.prepend || '') + token.raw, token);

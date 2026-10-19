@@ -145,12 +145,19 @@ def wrapped(lines, width):
     return result
 
 
-def run(runtime, focus=None, root=None, detail=False):
+def run(runtime, focus=None, root=None, detail=False, embedded=False):
     from .management import actions, stamp, stage_request
     runtime = Path(runtime)
     spec = read_json(runtime / "spec.json", {})
     if not spec.get("home"):
         return 1
+    from .viewer import state as view_state, wait_ready, close_view, select_entry
+    initial_view = wait_ready(runtime) if embedded else {}
+    if embedded:
+        if not initial_view:
+            return 1
+        focus, root, detail = initial_view.get("focus"), initial_view["root"], initial_view.get("detail", False)
+    token = initial_view.get("token")
     def ui(screen):
         try:
             curses.curs_set(0)
@@ -165,12 +172,25 @@ def run(runtime, focus=None, root=None, detail=False):
         pending, notice = None, ""
         selection, selected_key, expanded, scroll = 0, tuple(focus) if focus else None, detail, 0
         refreshed, snapshot, detail_key, body, palette = 0, {}, None, [], None
+        request = initial_view.get("request")
+        last_selected = None
         while runtime.exists() and not (runtime / "exit.json").exists():
+            if embedded:
+                active_view = view_state(runtime)
+                if active_view.get("token") != token:
+                    return "main"
+                if active_view.get("request") != request:
+                    request = active_view["request"]
+                    selected_key = tuple(active_view.get("focus") or []) or None
+                    expanded, scroll = active_view.get("detail", False), 0
+                    history, pending, notice = not expanded, None, ""
             if time.monotonic()-refreshed >= 1:
                 snapshot = read_json(runtime / "snapshot.json", {})
                 refreshed = time.monotonic()
             current = (snapshot.get("root") or {}).get("id")
             if current != identity:
+                if embedded:
+                    return "main"
                 identity, selected_key, selection, expanded, scroll = current, None, 0, False, 0
                 inline = False
                 pending, notice = None, ""
@@ -180,11 +200,16 @@ def run(runtime, focus=None, root=None, detail=False):
             if selected_key:
                 match = next((i for i, item in enumerate(items) if item["key"] == selected_key), None)
                 if match is None:
+                    if embedded and expanded:
+                        return "main"
                     selected_key, expanded, scroll = None, False, 0
                     pending = None
                 else:
                     selection = match
             selection = min(selection, max(0, len(items)-1))
+            if embedded and expanded and items and items[selection]["key"] != last_selected:
+                select_entry(runtime, items[selection]["key"], identity, token)
+                last_selected = items[selection]["key"]
             en = snapshot.get("display", {}).get("language") == "en"
             config = snapshot.get("display") or {}
             if config.get("colors") != palette:
@@ -198,8 +223,8 @@ def run(runtime, focus=None, root=None, detail=False):
                         screen.addstr(y, 1, clip(value, width-2), attr)
                     except curses.error:
                         pass
-            line(0, "Codex HUD · Tasks & Skills" if en else "Codex HUD · 子任务与 Skills", curses.A_BOLD)
-            line(1, ("↑↓ scroll · Esc back to HUD · q back to input" if en else "↑↓ 滚动 · Esc 返回 HUD · q 返回输入") if inline else ("↑↓ scroll · Esc list · q close" if en else "↑↓ 滚动 · Esc 返回列表 · q 关闭") if expanded else ("↑↓ select · Enter inspect · Esc/q close" if en else "↑↓ 选择 · Enter 查看 · Esc/q 返回主会话"))
+            line(0, "Codex HUD · Task / Skill view · read-only" if en else "Codex HUD · 子任务 / Skill 视图 · 只读", curses.A_BOLD)
+            line(1, ("↑↓ scroll · Tab switch · Esc main" if en else "↑↓ 滚动 · Tab 切换 · Esc 返回主会话") if expanded else ("↑↓ select · Enter inspect · Esc/q main" if en else "↑↓ 选择 · Enter 查看 · Esc/q 返回主会话"))
             room = max(1, height-4)
             if pending:
                 line(1, "Enter prepare draft · Esc cancel" if en else "Enter 生成请求草稿 · Esc 取消")
@@ -234,7 +259,7 @@ def run(runtime, focus=None, root=None, detail=False):
             key = screen.getch()
             if pending:
                 if key in (27, ord("q")):
-                    pending, notice = None, ""
+                    return "main"
                 elif key in (10, 13, curses.KEY_ENTER):
                     try:
                         stage_request(runtime, identity, *pending)
@@ -251,12 +276,20 @@ def run(runtime, focus=None, root=None, detail=False):
             if not expanded and key in (ord("h"), ord("H")):
                 history, selected_key, selection = not history, None, 0
                 continue
-            if key == ord("q") or (key == 27 and not expanded):
+            if key in (ord("q"), 27):
                 return "main"
-            if key == 27 and inline:
-                return "hud"
-            if key == 27:
+            if key in (ord("l"), ord("L")) and expanded:
                 expanded, scroll = False, 0
+                pending = None
+            elif key in (9, curses.KEY_BTAB) and expanded and items:
+                from .display import render_rows
+                visible = {row.key for row in render_rows(snapshot, config={**config, "agents_limit": 0}) if row.key}
+                candidates = [item for item in items if history or item["key"] in visible]
+                if candidates:
+                    current_index = next((i for i, item in enumerate(candidates) if item["key"] == selected_key), -1)
+                    selected_key = candidates[(current_index + (1 if key == 9 else -1)) % len(candidates)]["key"]
+                    selection = next(i for i, item in enumerate(items) if item["key"] == selected_key)
+                    scroll, notice = 0, ""
             elif key in (10, 13, curses.KEY_ENTER) and items:
                 expanded, scroll = True, 0
             elif key in (curses.KEY_DOWN, ord("j"), curses.KEY_UP, ord("k")):
@@ -271,8 +304,12 @@ def run(runtime, focus=None, root=None, detail=False):
                 selected_key = items[selection]["key"]
     try:
         destination = curses.wrapper(ui)
+    except KeyboardInterrupt:
+        destination = "main"
     finally:
-        if runtime.exists() and spec.get("socket") and spec.get("top"):
+        if embedded:
+            close_view(runtime, token)
+        elif runtime.exists() and spec.get("socket") and spec.get("top"):
             nav = read_json(runtime / "navigation.json", {})
             target = spec["hud"] if locals().get("destination") == "hud" and nav.get("root") == root and tuple(nav.get("key") or []) == tuple(focus or []) else spec["top"]
             if target == spec["top"]:

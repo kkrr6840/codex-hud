@@ -57,7 +57,8 @@ def down(runtime, pane):
         tmux(socket, "send-keys", "-t", target, "Down", check=False)
         return 0
     if pane != spec.get("top"):
-        if pane == spec.get("hud") and tmux(socket, "display-message", "-p", "-t", spec["top"], "#{pane_active}").stdout.strip() == "1":
+        from .viewer import state
+        if pane == spec.get("hud") and not state(runtime).get("ready") and tmux(socket, "display-message", "-p", "-t", spec["top"], "#{pane_active}").stdout.strip() == "1":
             return forward(spec["top"])
         return forward()
     try:

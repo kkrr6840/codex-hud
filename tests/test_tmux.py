@@ -238,15 +238,30 @@ f.close()
         def popup():
             return any(' _agents '+spec['runtime'] in line for line in subprocess.check_output(['ps','-axo','command='],text=True).splitlines())
         def main_text():return self.tmux(spec,"capture-pane","-p","-t",spec['top']).stdout
+        view_file=Path(spec['runtime'])/'view.json'
+        def upper_text():
+            try:view=json.loads(view_file.read_text())
+            except (OSError,ValueError):return ''
+            return self.tmux(spec,'capture-pane','-p','-t',view['pane'],check=False).stdout
         proc.stdin.write(b'\x1b[B\r');proc.stdin.flush()
-        self.wait_for(lambda: shown('fixture skill description'))
-        self.assertTrue(shown('/fixture/skills/demo/SKILL.md'))
+        self.wait_for(lambda: 'fixture skill description' in upper_text())
+        view=json.loads(view_file.read_text())
+        self.assertEqual(set(self.tmux(spec,'list-panes','-t',view['main_window'],'-F','#{pane_id}').stdout.splitlines()),{view['pane'],spec['hud']})
+        self.assertNotEqual(self.tmux(spec,'display-message','-p','-t',spec['top'],'#{window_id}').stdout.strip(),view['main_window'])
+        self.assertIn('/fixture/skills/demo/SKILL.md',upper_text())
+        proc.stdin.write(b'\t');proc.stdin.flush();self.wait_for(lambda: 'management fixture output' in upper_text())
+        self.assertEqual(json.loads(view_file.read_text())['pane'],view['pane'])
+        proc.stdin.write(b'\t');proc.stdin.flush();self.wait_for(lambda: 'fixture skill description' in upper_text())
         proc.stdin.write(b'\x1b');proc.stdin.flush();self.wait_for(lambda: not popup())
-        proc.stdin.write(b'\x1b[B\r');proc.stdin.flush()
-        self.wait_for(lambda: shown('management fixture output'))
+        self.assertFalse(view_file.exists())
+        self.assertEqual(self.tmux(spec,'display-message','-p','-t',spec['top'],'#{pane_active}').stdout.strip(),'1')
+        proc.stdin.write(b'\x1b[B\x1b[B\r');proc.stdin.flush()
+        self.wait_for(lambda: 'management fixture output' in upper_text())
         proc.stdin.write(b's');proc.stdin.flush();self.wait_for(lambda: shown('Enter 生成请求草稿'))
-        proc.stdin.write(b'\x1b');proc.stdin.flush();time.sleep(.2)
+        proc.stdin.write(b'\x1b');proc.stdin.flush();self.wait_for(lambda: not view_file.exists())
         self.assertNotIn('Codex HUD 子任务',main_text())
+        proc.stdin.write(b'\x1b[B\x1b[B\r');proc.stdin.flush()
+        self.wait_for(lambda: 'management fixture output' in upper_text())
         proc.stdin.write(b's\r');proc.stdin.flush();self.wait_for(lambda: not popup())
         self.wait_for(lambda: 'Codex HUD' in main_text())
         self.assertFalse((home/'input.jsonl').exists(), 'preparing must not submit a CLI input line')
@@ -256,6 +271,47 @@ f.close()
         with self.assertRaises(ValueError):stage_request(spec['runtime'],root,current['key'],'stop',stamp(current))
         self.assertEqual(main_text(),draft)
         self.assertEqual(json.loads((Path(spec['runtime'])/'runner.json').read_text())['pid'],before)
+        # Browsing with an existing draft retains its exact PTY/geometry. If
+        # the viewer crashes, the original CLI is rejoined rather than respawned.
+        proc.stdin.write(b'\x15\n');proc.stdin.flush()
+        self.wait_for(lambda: 'Ask Codex to do anything' in main_text())
+        proc.stdin.write(b'keep-me');proc.stdin.flush();self.wait_for(lambda: 'keep-me' in main_text())
+        geometry=self.tmux(spec,'display-message','-p','-t',spec['top'],'#{cursor_x},#{cursor_y},#{pane_width},#{pane_height}').stdout
+        from codex_hud.viewer import open_view
+        open_view(spec['runtime'],current['key'],root,True)
+        self.wait_for(lambda: 'management fixture output' in upper_text())
+        self.assertIn('keep-me',main_text())
+        self.assertEqual(self.tmux(spec,'display-message','-p','-t',spec['top'],'#{cursor_x},#{cursor_y},#{pane_width},#{pane_height}').stdout,geometry)
+        self.tmux(spec,'resize-window','-t',json.loads(view_file.read_text())['main_window'],'-x','90','-y','30')
+        self.assertEqual(self.tmux(spec,'display-message','-p','-t',spec['top'],'#{cursor_x},#{cursor_y},#{pane_width},#{pane_height}').stdout,geometry)
+        proc.stdin.write(b'\x03');proc.stdin.flush();self.wait_for(lambda: not view_file.exists())
+        self.assertIn('keep-me',main_text())
+        self.assertEqual(json.loads((Path(spec['runtime'])/'runner.json').read_text())['pid'],before)
+        open_view(spec['runtime'],current['key'],root,True)
+        self.wait_for(lambda: 'management fixture output' in upper_text())
+        from codex_hud.viewer import close_view, layout_lock
+        from codex_hud.cli import tmux as real_tmux
+        from unittest.mock import patch
+        def failed_restore(socket, *args, **kwargs):
+            if args and args[0]=='join-pane':
+                return subprocess.CompletedProcess(args,1,'','fixture transient failure')
+            return real_tmux(socket,*args,**kwargs)
+        with layout_lock(spec['runtime']):
+            self.tmux(spec,'kill-pane','-t',json.loads(view_file.read_text())['pane'])
+            with patch('codex_hud.cli.tmux',side_effect=failed_restore):
+                self.assertFalse(close_view(spec['runtime'],locked=True))
+                self.assertTrue(view_file.exists(), 'failed restoration retains its recovery record')
+        self.wait_for(lambda: not view_file.exists())
+        self.assertIn('keep-me',main_text())
+        self.assertEqual(json.loads((Path(spec['runtime'])/'runner.json').read_text())['pid'],before)
+        open_view(spec['runtime'],current['key'],root,True)
+        self.wait_for(lambda: 'management fixture output' in upper_text())
+        from codex_hud.sources import atomic_json
+        from codex_hud.viewer import layout_lock
+        with layout_lock(spec['runtime']):
+            atomic_json(view_file,{**json.loads(view_file.read_text()),'ready':False})
+        self.wait_for(lambda: not view_file.exists())
+        self.assertIn('keep-me',main_text())
         proc.stdin.write(b'\x15\nquit\n');proc.stdin.flush()
         self.wait_for(lambda: not Path(spec['runtime']).exists())
 
@@ -600,7 +656,7 @@ f.close()
             else:
                 # Exercise the actual prefix+Down binding on the attached client.
                 proc.stdin.write(b"\x02\x1b[B"); proc.stdin.flush()
-                self.wait_for(lambda: terminal_contains("子任务与 Skills"))
+                self.wait_for(lambda: terminal_contains("子任务 / Skill 视图"))
             self.wait_for(popup_pids)
             if not direct_agents:
                 proc.stdin.write(b"\r"); proc.stdin.flush()
@@ -610,8 +666,6 @@ f.close()
             proc.stdin.write(b"\x1b" if direct_agents else b"q"); proc.stdin.flush()
             self.wait_for(lambda: not popup_pids())
             if direct_agents:
-                self.wait_for(lambda: active(spec["hud"]))
-                proc.stdin.write(b"\x1b"); proc.stdin.flush()
                 self.wait_for(lambda: active(spec["top"]) and not navigation.exists())
                 # Fast editing+Down must remain in the official composer.
                 proc.stdin.write(b"draft\x1b[B"); proc.stdin.flush()
