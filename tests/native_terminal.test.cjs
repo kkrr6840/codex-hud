@@ -465,11 +465,11 @@ setTimeout(update,150); setInterval(update,150);
   const visible = () => Array.from({ length: terminal.rows }, (_, y) => terminal.buffer.active.getLine(terminal.buffer.active.viewportY + y)?.translateToString(true) || '').join('\n');
   const inputs = () => fs.existsSync(inputLog) ? fs.readFileSync(inputLog, 'utf8').trim().split('\n').map(JSON.parse).filter(entry => entry.input).map(entry => entry.input).join('') : '';
   const requests = () => fs.existsSync(bridgeLog) ? fs.readFileSync(bridgeLog, 'utf8').trim().split('\n').map(JSON.parse) : [];
-  const selected = () => {
+  const selected = (label = 'agent Alpha') => {
     const buffer = terminal.buffer.active;
     for (let y = 0; y < terminal.rows; y++) {
       const line = buffer.getLine(buffer.viewportY + y);
-      if (line?.translateToString(true).includes('agent Alpha') && line.getCell(0).isInverse()) return true;
+      if (line?.translateToString(true).includes(label) && line.getCell(0).isInverse()) return true;
     }
     return false;
   };
@@ -497,10 +497,14 @@ setTimeout(update,150); setInterval(update,150);
     assert.equal(inputs().slice(inputBefore), `${CSI}200~HUD request for a${CSI}201~`, 'draft paste has no submit key');
     outer.write('\x7f'.repeat('HUD request for a'.length)); await until(() => visible().includes('› Ask Codex'), 'request draft erased');
     fs.writeFileSync(path.join(base, 'skills'), '1'); await until(() => visible().includes('Skills demo'), 'skill row shown');
-    outer.write(`${CSI}B\r`); await until(() => visible().includes('Skill source /fixture/SKILL.md'), 'skill details work through real PTY');
+    await until(() => visible().includes('› Ask Codex') && Date.now() - lastOutput >= 100, 'skill layout resize settled');
+    outer.write(`${CSI}B`); await until(() => selected('Skills demo'), 'skill row selected');
+    outer.write('\r'); await until(() => visible().includes('Skill source /fixture/SKILL.md'), 'skill details work through real PTY');
     outer.write('\x1b'); await wait(100); outer.write('\x1b'); await wait(100);
     fs.unlinkSync(path.join(base, 'skills')); await until(() => visible().includes('agent Alpha'), 'agent rows restored');
-    outer.write(`${CSI}B\r`); await until(() => visible().includes('Live agent output'), 'agent details reopened');
+    await until(() => visible().includes('› Ask Codex') && Date.now() - lastOutput >= 100, 'restored agent layout resize settled');
+    outer.write(`${CSI}B`); await until(selected, 'agent row selected after layout change');
+    outer.write('\r'); await until(() => visible().includes('Live agent output'), 'agent details reopened');
     outer.write('\x1b'); await until(selected, 'first Esc returned to HUD selection');
     outer.write('\x1b'); await wait(100);
     outer.write(`z${CSI}B`);
