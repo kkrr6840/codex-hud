@@ -430,6 +430,73 @@ class SourcesTest(unittest.TestCase):
         reader.tool_output({"call_id": "poll", "output": responses}, 103)
         self.assertEqual({j["process_id"]: (j["status"], j["usage"]["input_tokens"]) for j in reader.jobs.values()}, {"11": ("completed", 111), "22": ("completed", 222)})
 
+    def test_sequential_commands_and_polls_use_print_order_without_phantom_rows(self):
+        path = self.thread("root-A")
+        command = "python3 /path/codex-x-codex/scripts/offload.py run --task 'check'"
+        source = "\n".join("text(await tools.exec_command({cmd:" + json.dumps(cmd) + "}));"
+                           for cmd in (command, "unrelated", command))
+        self.assertEqual([ix for _, _, ix in literal_tool_requests(source)],
+                         [("ordered", i, 3) for i in range(3)])
+        def append(payload, at):
+            with path.open("a") as handle:
+                handle.write(json.dumps({"type": "response_item", "timestamp": at, "payload": payload}) + "\n")
+        def output(values):
+            return [{"text": "Script completed\nOutput:"}] + [{"text": json.dumps(v)} for v in values]
+        append({"type": "custom_tool_call", "name": "exec", "call_id": "start", "input": source}, 100)
+        collector = Collector(home=self.home, root_id="root-A")
+        self.assertEqual(collector.collect()["offload"]["jobs"], [])
+        append({"type": "custom_tool_call_output", "call_id": "start", "output": output([
+            {"session_id": 11, "output": "", "wall_time_seconds": 1},
+            {"exit_code": 9, "output": '{"ok":true,"outcome":"completed","usage":{"input_tokens":999}}'},
+            {"session_id": 22, "output": "", "wall_time_seconds": 1}])}, 101)
+        jobs = collector.collect()["offload"]["jobs"]
+        self.assertEqual({j["process_id"] for j in jobs}, {"11", "22"})
+        self.assertTrue(all(j["status"] == "running" and j["started"] == 100 for j in jobs))
+        self.assertTrue(all(elapsed(j, 103) == "3s" for j in jobs))
+        # One result is redirected to a file: process completion is known,
+        # but a successful shell exit must not invent a successful model result.
+        append({"type": "custom_tool_call", "name": "exec", "call_id": "poll", "input":
+                "text(await tools.write_stdin({session_id:22})); text(await tools.write_stdin({session_id:11}));"}, 110)
+        append({"type": "custom_tool_call_output", "call_id": "poll", "output": output([
+            {"exit_code": 0, "output": ""},
+            {"exit_code": 0, "output": '{"ok":true,"outcome":"completed","usage":{"input_tokens":111}}'}])}, 112)
+        snapshot = collector.collect()
+        jobs = {j["process_id"]: j for j in snapshot["offload"]["jobs"]}
+        self.assertEqual(jobs["11"]["usage"]["input_tokens"], 111)
+        self.assertEqual((jobs["22"]["status"], jobs["22"]["ended"], jobs["22"]["usage"]), ("unknown", 112, None))
+        self.assertEqual(elapsed(jobs["22"], 120), "12s")
+        self.assertFalse(any("codex-x-codex" in text for text, _ in lines(snapshot)))
+
+    def test_sequential_projection_deduplicates_and_ambiguous_outputs_stay_unavailable(self):
+        path = self.thread("root-A")
+        command = "python3 /path/codex-x-codex/scripts/offload.py run --task 'check'"
+        source = "text(await tools.exec_command({cmd:" + json.dumps(command) + "})); text(await tools.exec_command({cmd:'other'}));"
+        reader = Rollout(path); reader.refresh()
+        for values in ([{"session_id": 11, "output": ""}],
+                       [{"session_id": i, "output": ""} for i in (11, 22, 33)],
+                       [{"i": i, "value": {"session_id": n, "output": ""}} for i, n in ((1, 22), (0, 11))]):
+            reader.tool_call({"name": "exec", "call_id": "batch", "input": source}, 100)
+            reader.tool_output({"call_id": "batch", "output": [{"text": json.dumps(v)} for v in values]}, 101)
+            self.assertIsNone(reader.jobs["batch:0"]["process_id"])
+        for prefix, suffix in (("if (ready) {", "}"), ("for (const x of xs) {", "}"), ("", "text(extra);")):
+            reader.tool_call({"name": "exec", "call_id": "ambiguous", "input": prefix+source+suffix}, 100)
+            self.assertFalse(any(key.startswith("ambiguous") for key in reader.jobs))
+        callback = source.replace("cmd:'other'", "cmd:'other', workdir:makePath()")
+        self.assertEqual([ix for _, _, ix in literal_tool_requests(callback)], [-1, -1])
+        literal_options = source.replace("cmd:'other'", 'cmd:\'other\', "workdir":"/tmp", yield_time_ms:1000, tty:false')
+        self.assertEqual([ix for _, _, ix in literal_tool_requests(literal_options)], [("ordered", 0, 2), ("ordered", 1, 2)])
+        records = [
+            {"type": "custom_tool_call", "name": "exec", "call_id": "batch", "input": source},
+            {"type": "custom_tool_call_output", "call_id": "batch", "output": [{"text": json.dumps(v)} for v in
+                ({"session_id": 11, "output": ""}, {"exit_code": 0, "output": ""})]}]
+        with path.open("a") as handle:
+            handle.write("".join(json.dumps({"type": "response_item", "timestamp": 100, "payload": p})+"\n" for p in records))
+        self.job("root-A", "projected", usage={"input_tokens": 500})
+        item = json.loads(self.history.execute("SELECT item_json FROM thread_items").fetchone()[0]);item["processId"] = "11"
+        self.history.execute("UPDATE thread_items SET item_json=?", (json.dumps(item),));self.history.commit()
+        jobs = Collector(home=self.home, root_id="root-A").collect()["offload"]["jobs"]
+        self.assertEqual([(j["id"], j["status"]) for j in jobs], [("projected", "completed")])
+
     def test_literal_batches_count_non_tool_entries_and_ignore_ambiguous_javascript(self):
         source = '''// tools.exec_command({cmd:"fake"})
         const example = "tools.exec_command({cmd:'fake'})";

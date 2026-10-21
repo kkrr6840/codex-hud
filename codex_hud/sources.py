@@ -315,7 +315,7 @@ class Rollout:
                 item = {"id": identity, "command": value, "status": "unknown"}
                 job = offload_job({"thread_id": self.data.get("id"), "item_json": json.dumps(item),
                                   "created_at_ms": (timestamp(when) or 0) * 1000}, "gpt-6-astra")
-                if job:
+                if job and index != -1:
                     self.jobs[identity] = job
                     bindings.append((identity, index))
             elif kind == "write_stdin" and value in self.tool_sessions:
@@ -340,29 +340,35 @@ class Rollout:
             return
         output = payload.get("output") or ""
         texts = [output] if isinstance(output, str) else [x.get("text", "") for x in output if isinstance(x, dict)]
+        outputs = [pair for text in texts for pair in command_outputs(text)]
         for text in texts:
             cell = re.search(r"Script running with cell ID (\S+)", text)
             if cell:
                 self.cells[cell[1]] = bindings
-            for index, value in command_outputs(text):
-                for identity, expected in bindings:
-                    if (expected is not None and index != expected) or identity not in self.jobs:
-                        continue
-                    job = self.jobs[identity]
-                    if type(value.get("session_id")) is int and "output" in value:
-                        job["process_id"] = str(value["session_id"])
-                        self.tool_sessions[value["session_id"]] = identity
-                        if job["status"] != "running":
-                            job["started"] = (timestamp(when) or time.time()) - value.get("wall_time_seconds", 0)
-                        job["status"] = "running"
-                    if type(value.get("exit_code")) is int and "output" in value:
-                        response = response_json(value.get("output"))
-                        job.update(status="completed" if response and response.get("ok") else "failed" if value.get("exit_code") or (response and not response.get("ok")) else "unknown",
-                                   ended=timestamp(when), usage=(response or {}).get("usage"),
-                                   duration=(response or {}).get("duration_seconds"),
-                                   model=(response or {}).get("model") or job["model"],
-                                   worker_id=(response or {}).get("thread_id"), error=(response or {}).get("error"),
-                                   output=(response or {}).get("answer"))
+        # Direct, sequential text(await tools...) calls have positional output,
+        # unlike indexed Promise batches. Require the complete matching batch;
+        # partial/yielded or extra output must not borrow another command's data.
+        for position, (index, value) in enumerate(outputs):
+            for identity, expected in bindings:
+                matched = (index is None and len(outputs) == expected[2] and position == expected[1]
+                           and all(i is None for i, _ in outputs)) if isinstance(expected, tuple) else expected is None or index == expected
+                if not matched or identity not in self.jobs:
+                    continue
+                job = self.jobs[identity]
+                if type(value.get("session_id")) is int and "output" in value:
+                    job["process_id"] = str(value["session_id"])
+                    self.tool_sessions[value["session_id"]] = identity
+                    if job["status"] != "running":
+                        job["started"] = (timestamp(when) or time.time()) - value.get("wall_time_seconds", 0)
+                    job["status"] = "running"
+                if type(value.get("exit_code")) is int and "output" in value:
+                    response = response_json(value.get("output"))
+                    job.update(status="completed" if response and response.get("ok") else "failed" if value.get("exit_code") or (response and not response.get("ok")) else "unknown",
+                               ended=timestamp(when), usage=(response or {}).get("usage"),
+                               duration=(response or {}).get("duration_seconds"),
+                               model=(response or {}).get("model") or job["model"],
+                               worker_id=(response or {}).get("thread_id"), error=(response or {}).get("error"),
+                               output=(response or {}).get("answer"))
 
 
 def literal_tool_requests(source):
@@ -371,6 +377,7 @@ def literal_tool_requests(source):
     strings = list(literal.finditer(source))
     masked = literal.sub(lambda match: " " * len(match[0]), source)
     calls = list(re.finditer(r"\btools\.(\w+)\s*\(", masked))
+    ordered = ordered_tool_calls(masked, calls)
     batches = list(re.finditer(r"Promise\.(?:all|allSettled)\s*\(\s*\[", masked))
     batch_start, batch_end = -1, -1
     if len(batches) == 1:
@@ -396,8 +403,8 @@ def literal_tool_requests(source):
         if any(masked[left:right].lstrip().startswith("...") for left, right in entries):
             entries = []
     requests = []
-    for match in calls:
-        index = None if len(calls) == 1 and not batches else -1
+    for call_number, match in enumerate(calls):
+        index = ("ordered", call_number, len(calls)) if ordered else None if len(calls) == 1 and not batches else -1
         for position, (left, right) in enumerate(entries):
             if left <= match.start() < right and sum(left <= call.start() < right for call in calls) == 1:
                 prefix = masked[left:match.start()].strip()
@@ -432,6 +439,32 @@ def literal_tool_requests(source):
             break
         requests.append((match[1], value, index))
     return requests
+
+
+def ordered_tool_calls(masked, calls):
+    """Recognize only direct sequential printing, not loops or reordered vars."""
+    if len(calls) < 2:
+        return False
+    # Quoted strings/keys are whitespace in this mask. Flat literal options
+    # cannot run callbacks or emit extra values while constructing arguments.
+    field = r"(?:[A-Za-z_$][\w$]*)?\s*:\s*(?:-?\d+(?:\.\d+)?|true|false|null)?\s*"
+    options = r"\s*\{\s*(?:" + field + r"(?:,\s*" + field + r")*,?\s*)?\}\s*"
+    previous = 0
+    for call in calls:
+        if call[1] not in ("exec_command", "write_stdin") or not re.fullmatch(r"\s*text\s*\(\s*await\s+", masked[previous:call.start()]):
+            return False
+        depth, end = 1, call.end()
+        for end in range(call.end(), len(masked)):
+            depth += (masked[end] == "(") - (masked[end] == ")")
+            if depth == 0:
+                break
+        tail = re.match(r"\s*\)\s*;?", masked[end+1:]) if depth == 0 else None
+        if not tail:
+            return False
+        if not re.fullmatch(options, re.sub(r"\s+", " ", masked[call.end():end])):
+            return False
+        previous = end+1+tail.end()
+    return not masked[previous:].strip()
 
 
 def command_outputs(text):
@@ -778,6 +811,11 @@ class Collector:
             if reader.data.get("id") not in rows and reader.data.get("id") != self.root_id:
                 continue
             for job in reader.jobs.values():
+                if job.get("status") == "unknown" and not any(job.get(k) for k in ("process_id", "worker_id", "ended")):
+                    # A parsed command without a correlated tool result is not
+                    # evidence of a live worker. The native command projection
+                    # can still supply its verified lifecycle independently.
+                    continue
                 if job.get("process_id") in process_ids:
                     continue
                 if job.get("worker_id") and job["worker_id"] in worker_ids:

@@ -112,6 +112,8 @@ After an upgrade, the hud skill can refresh the macOS observer while keeping the
 
 ## Task management and Skill details (v0.8)
 
+v0.8.3 also correlates directly printed sequential commands and polls within a tool call, preventing duplicate `? / unknown duration` rows. Command text without an attributable execution record is not presented as an active worker; native command records can still provide its lifecycle. If relay JSON is redirected to a file, HUD does not open that logged path. Outcome and usage can remain unavailable, but commands known to have ended follow the history visibility settings. A zero shell exit code alone is not evidence of model-task success.
+
 Starting with v0.8.2, **Main agent** is the first selectable HUD entry by default. Press **Down** from the default empty composer to enter navigation, then **Up/Down** to switch the upper viewport directly between the live main conversation, Skills, and child tasks. The bottom HUD stays visible. Selecting Main restores the original live CLI while keeping navigation focused for another switch; **Enter** or **Esc** returns to the composer. **One Esc** from a child view also returns directly to the composer, while **Tab / Shift-Tab** cycles entries. The original CLI and its draft are preserved. With a draft, a native menu, or no selectable rows, ordinary Down passes through to Codex. Hide the Main entry with `config --hide main_agent`; a fresh HUD with no data remains hidden.
 
 Task and Skill views are read-only and use the existing upper viewport rather than a popup or another CLI. On macOS the original CLI pane and PTY remain alive, and a failed viewer restores that pane. Stop/retry request preparation remains available in task details.
